@@ -479,6 +479,7 @@ mod tests {
                     default_value: None,
                     enum_values: None,
                     read_path: None,
+                    update_only: false,
                 },
                 IacAttribute {
                     api_name: "value".to_string(),
@@ -492,6 +493,7 @@ mod tests {
                     default_value: None,
                     enum_values: None,
                     read_path: None,
+                    update_only: false,
                 },
                 IacAttribute {
                     api_name: "tags".to_string(),
@@ -505,6 +507,7 @@ mod tests {
                     default_value: None,
                     enum_values: None,
                     read_path: None,
+                    update_only: false,
                 },
                 IacAttribute {
                     api_name: "secret_id".to_string(),
@@ -518,6 +521,7 @@ mod tests {
                     default_value: None,
                     enum_values: None,
                     read_path: None,
+                    update_only: false,
                 },
                 IacAttribute {
                     api_name: "protection_type".to_string(),
@@ -534,6 +538,7 @@ mod tests {
                     default_value: None,
                     enum_values: None,
                     read_path: None,
+                    update_only: false,
                 },
             ],
             identity: IdentityInfo {
@@ -559,6 +564,7 @@ mod tests {
             default_value: None,
             enum_values: None,
             read_path: None,
+            update_only: false,
         });
         resource
     }
@@ -654,6 +660,7 @@ mod tests {
                 default_value: None,
                 enum_values: None,
                 read_path: None,
+                update_only: false,
             }],
         };
         let output = generate_data_source_module(&ds, "test");
@@ -729,6 +736,7 @@ mod tests {
                 default_value: None,
                 enum_values: None,
                 read_path: None,
+                update_only: false,
             }],
         };
         let output = generate_data_source_module(&ds, "test");
