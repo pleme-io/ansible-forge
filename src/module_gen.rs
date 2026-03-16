@@ -870,4 +870,463 @@ mod tests {
             "data source read_resource must return empty dict {{}}, got:\n{output}"
         );
     }
+
+    /// Resource with ALL IacType variants.
+    fn resource_with_all_types() -> IacResource {
+        IacResource {
+            name: "test_all_types".to_string(),
+            description: "All types".to_string(),
+            category: "test".to_string(),
+            crud: CrudInfo {
+                create_endpoint: "/create".to_string(),
+                create_schema: "Create".to_string(),
+                update_endpoint: Some("/update".to_string()),
+                update_schema: Some("Update".to_string()),
+                read_endpoint: "/read".to_string(),
+                read_schema: "Read".to_string(),
+                read_response_schema: None,
+                delete_endpoint: "/delete".to_string(),
+                delete_schema: "Delete".to_string(),
+            },
+            attributes: vec![
+                IacAttribute {
+                    api_name: "str_field".to_string(),
+                    canonical_name: "str_field".to_string(),
+                    description: "A string".to_string(),
+                    iac_type: IacType::String,
+                    required: false, computed: false, sensitive: false, immutable: false,
+                    default_value: None, enum_values: None, read_path: None, update_only: false,
+                },
+                IacAttribute {
+                    api_name: "int_field".to_string(),
+                    canonical_name: "int_field".to_string(),
+                    description: "An int".to_string(),
+                    iac_type: IacType::Integer,
+                    required: false, computed: false, sensitive: false, immutable: false,
+                    default_value: None, enum_values: None, read_path: None, update_only: false,
+                },
+                IacAttribute {
+                    api_name: "float_field".to_string(),
+                    canonical_name: "float_field".to_string(),
+                    description: "A float".to_string(),
+                    iac_type: IacType::Float,
+                    required: false, computed: false, sensitive: false, immutable: false,
+                    default_value: None, enum_values: None, read_path: None, update_only: false,
+                },
+                IacAttribute {
+                    api_name: "bool_field".to_string(),
+                    canonical_name: "bool_field".to_string(),
+                    description: "A bool".to_string(),
+                    iac_type: IacType::Boolean,
+                    required: false, computed: false, sensitive: false, immutable: false,
+                    default_value: None, enum_values: None, read_path: None, update_only: false,
+                },
+                IacAttribute {
+                    api_name: "list_field".to_string(),
+                    canonical_name: "list_field".to_string(),
+                    description: "A list".to_string(),
+                    iac_type: IacType::List(Box::new(IacType::String)),
+                    required: false, computed: false, sensitive: false, immutable: false,
+                    default_value: None, enum_values: None, read_path: None, update_only: false,
+                },
+                IacAttribute {
+                    api_name: "set_field".to_string(),
+                    canonical_name: "set_field".to_string(),
+                    description: "A set".to_string(),
+                    iac_type: IacType::Set(Box::new(IacType::Integer)),
+                    required: false, computed: false, sensitive: false, immutable: false,
+                    default_value: None, enum_values: None, read_path: None, update_only: false,
+                },
+                IacAttribute {
+                    api_name: "map_field".to_string(),
+                    canonical_name: "map_field".to_string(),
+                    description: "A map".to_string(),
+                    iac_type: IacType::Map(Box::new(IacType::String)),
+                    required: false, computed: false, sensitive: false, immutable: false,
+                    default_value: None, enum_values: None, read_path: None, update_only: false,
+                },
+                IacAttribute {
+                    api_name: "obj_field".to_string(),
+                    canonical_name: "obj_field".to_string(),
+                    description: "An object".to_string(),
+                    iac_type: IacType::Object { name: "Obj".to_string(), fields: vec![] },
+                    required: false, computed: false, sensitive: false, immutable: false,
+                    default_value: None, enum_values: None, read_path: None, update_only: false,
+                },
+                IacAttribute {
+                    api_name: "enum_field".to_string(),
+                    canonical_name: "enum_field".to_string(),
+                    description: "An enum".to_string(),
+                    iac_type: IacType::Enum {
+                        values: vec!["x".into(), "y".into()],
+                        underlying: Box::new(IacType::String),
+                    },
+                    required: false, computed: false, sensitive: false, immutable: false,
+                    default_value: None, enum_values: None, read_path: None, update_only: false,
+                },
+                IacAttribute {
+                    api_name: "any_field".to_string(),
+                    canonical_name: "any_field".to_string(),
+                    description: "An any".to_string(),
+                    iac_type: IacType::Any,
+                    required: false, computed: false, sensitive: false, immutable: false,
+                    default_value: None, enum_values: None, read_path: None, update_only: false,
+                },
+            ],
+            identity: IdentityInfo {
+                id_field: "str_field".to_string(),
+                import_field: "str_field".to_string(),
+                force_replace_fields: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn resource_with_all_iac_type_variants_in_argument_spec() {
+        let resource = resource_with_all_types();
+        let output = generate_resource_module(&resource, "test");
+
+        assert!(output.contains("'str_field': {'type': 'str'}"), "str missing");
+        assert!(output.contains("'int_field': {'type': 'int'}"), "int missing");
+        assert!(output.contains("'float_field': {'type': 'float'}"), "float missing");
+        assert!(output.contains("'bool_field': {'type': 'bool'}"), "bool missing");
+        assert!(output.contains("'list_field': {'type': 'list', 'elements': 'str'}"), "list missing");
+        assert!(output.contains("'set_field': {'type': 'list', 'elements': 'int'}"), "set missing");
+        assert!(output.contains("'map_field': {'type': 'dict'}"), "map missing");
+        assert!(output.contains("'obj_field': {'type': 'dict'}"), "object missing");
+        assert!(output.contains("'enum_field': {'type': 'str', 'choices': ['x', 'y']}"), "enum missing");
+        assert!(output.contains("'any_field': {'type': 'str'}"), "any missing");
+    }
+
+    #[test]
+    fn resource_with_all_iac_type_variants_in_documentation() {
+        let resource = resource_with_all_types();
+        let output = generate_resource_module(&resource, "test");
+        let doc_section = &output[output.find("DOCUMENTATION").unwrap()..output.find("EXAMPLES").unwrap()];
+
+        assert!(doc_section.contains("type: str"), "str doc missing");
+        assert!(doc_section.contains("type: int"), "int doc missing");
+        assert!(doc_section.contains("type: float"), "float doc missing");
+        assert!(doc_section.contains("type: bool"), "bool doc missing");
+        assert!(doc_section.contains("type: list"), "list doc missing");
+        assert!(doc_section.contains("type: dict"), "dict doc missing");
+    }
+
+    #[test]
+    fn module_with_no_attributes() {
+        let resource = IacResource {
+            name: "test_empty".to_string(),
+            description: "Empty resource".to_string(),
+            category: "test".to_string(),
+            crud: CrudInfo {
+                create_endpoint: "/create".to_string(),
+                create_schema: "Create".to_string(),
+                update_endpoint: None,
+                update_schema: None,
+                read_endpoint: "/read".to_string(),
+                read_schema: "Read".to_string(),
+                read_response_schema: None,
+                delete_endpoint: "/delete".to_string(),
+                delete_schema: "Delete".to_string(),
+            },
+            attributes: vec![],
+            identity: IdentityInfo {
+                id_field: "id".to_string(),
+                import_field: "id".to_string(),
+                force_replace_fields: vec![],
+            },
+        };
+
+        let output = generate_resource_module(&resource, "test");
+
+        // Should still have valid Python with state parameter
+        assert!(output.contains("AnsibleModule"));
+        assert!(output.contains("'state':"));
+        assert!(output.contains("module: empty"));
+        // RETURN should indicate no computed fields
+        let return_section = &output[output.find("RETURN").unwrap()..];
+        assert!(return_section.contains("# No computed fields"));
+    }
+
+    #[test]
+    fn data_source_module_structure() {
+        let ds = IacDataSource {
+            name: "test_role".to_string(),
+            description: "Get role info".to_string(),
+            read_endpoint: "/read-role".to_string(),
+            read_schema: "ReadRole".to_string(),
+            read_response_schema: None,
+            attributes: vec![
+                IacAttribute {
+                    api_name: "name".to_string(),
+                    canonical_name: "name".to_string(),
+                    description: "Role name".to_string(),
+                    iac_type: IacType::String,
+                    required: true, computed: false, sensitive: false, immutable: false,
+                    default_value: None, enum_values: None, read_path: None, update_only: false,
+                },
+                IacAttribute {
+                    api_name: "permissions".to_string(),
+                    canonical_name: "permissions".to_string(),
+                    description: "Permissions".to_string(),
+                    iac_type: IacType::List(Box::new(IacType::String)),
+                    required: false, computed: true, sensitive: false, immutable: false,
+                    default_value: None, enum_values: None, read_path: None, update_only: false,
+                },
+            ],
+        };
+
+        let output = generate_data_source_module(&ds, "test");
+
+        // Should contain the info suffix module name
+        assert!(output.contains("module: role_info"));
+        // Should NOT have state/create/delete/update
+        assert!(!output.contains("'state'"));
+        assert!(!output.contains("def create_resource"));
+        assert!(!output.contains("def delete_resource"));
+        assert!(!output.contains("def update_resource"));
+        // Input field should be in argument_spec
+        assert!(output.contains("'name': {'type': 'str', 'required': True}"));
+        // Computed field should NOT be in argument_spec
+        assert!(!output.contains("'permissions':"));
+        // Computed field should be in RETURN
+        let return_section = &output[output.find("RETURN").unwrap()..];
+        assert!(return_section.contains("permissions:"));
+    }
+
+    #[test]
+    fn test_playbook_yaml_structure() {
+        let resource = sample_resource();
+        let output = generate_test_playbook(&resource, "test");
+
+        // Should be valid YAML-like structure
+        assert!(output.starts_with("---"));
+        assert!(output.contains("hosts: localhost"));
+        assert!(output.contains("connection: local"));
+        assert!(output.contains("gather_facts: false"));
+        assert!(output.contains("tasks:"));
+        // Should have create, idempotent, delete tasks
+        assert!(output.contains("Create static_secret"));
+        assert!(output.contains("Create static_secret (idempotent)"));
+        assert!(output.contains("Delete static_secret"));
+        // Should have assertions
+        assert!(output.contains("ansible.builtin.assert"));
+        assert!(output.contains("create_result.changed"));
+        assert!(output.contains("delete_result.changed"));
+    }
+
+    #[test]
+    fn generate_all_produces_module_files() {
+        use iac_forge::{AuthInfo, Backend, IacProvider};
+        use std::collections::HashMap;
+
+        let backend = super::super::backend::AnsibleBackend::new();
+        let provider = IacProvider {
+            name: "mycloud".to_string(),
+            description: "Provider".to_string(),
+            version: "0.1.0".to_string(),
+            auth: AuthInfo::default(),
+            skip_fields: vec![],
+            platform_config: HashMap::new(),
+        };
+
+        let resources = vec![sample_resource()];
+        let data_sources: Vec<IacDataSource> = vec![];
+
+        let artifacts = backend
+            .generate_all(&provider, &resources, &data_sources)
+            .expect("generate_all should succeed");
+
+        // 1 resource + 0 data sources + 0 provider + 1 test = 2
+        assert_eq!(artifacts.len(), 2);
+        assert!(artifacts.iter().any(|a| a.path.contains("plugins/modules/")));
+        assert!(artifacts.iter().any(|a| a.path.contains("tests/integration/")));
+
+        // Verify module content is valid
+        for artifact in &artifacts {
+            if artifact.path.ends_with(".py") {
+                assert!(artifact.content.contains("AnsibleModule"));
+            }
+            if artifact.path.ends_with(".yml") {
+                assert!(artifact.content.contains("state: present"));
+            }
+        }
+    }
+
+    #[test]
+    fn module_name_follows_snake_case_from_resource_name() {
+        let resource = IacResource {
+            name: "test_my_complex_resource".to_string(),
+            description: "Complex".to_string(),
+            category: "test".to_string(),
+            crud: CrudInfo {
+                create_endpoint: "/create".to_string(),
+                create_schema: "Create".to_string(),
+                update_endpoint: None,
+                update_schema: None,
+                read_endpoint: "/read".to_string(),
+                read_schema: "Read".to_string(),
+                read_response_schema: None,
+                delete_endpoint: "/delete".to_string(),
+                delete_schema: "Delete".to_string(),
+            },
+            attributes: vec![],
+            identity: IdentityInfo {
+                id_field: "id".to_string(),
+                import_field: "id".to_string(),
+                force_replace_fields: vec![],
+            },
+        };
+
+        let output = generate_resource_module(&resource, "test");
+        // Module name should be snake_case with provider prefix stripped
+        assert!(output.contains("module: my_complex_resource"));
+    }
+
+    #[test]
+    fn set_type_maps_to_list() {
+        assert_eq!(iac_type_to_ansible(&IacType::Set(Box::new(IacType::String))), "list");
+        assert_eq!(
+            list_elements_type(&IacType::Set(Box::new(IacType::String))),
+            Some("str")
+        );
+    }
+
+    #[test]
+    fn any_type_maps_to_str() {
+        assert_eq!(iac_type_to_ansible(&IacType::Any), "str");
+    }
+
+    #[test]
+    fn object_type_maps_to_dict() {
+        assert_eq!(
+            iac_type_to_ansible(&IacType::Object {
+                name: "Obj".to_string(),
+                fields: vec![],
+            }),
+            "dict"
+        );
+    }
+
+    #[test]
+    fn test_playbook_with_enum_required_field() {
+        let resource = IacResource {
+            name: "test_thing".to_string(),
+            description: "Thing".to_string(),
+            category: "test".to_string(),
+            crud: CrudInfo {
+                create_endpoint: "/create".to_string(),
+                create_schema: "Create".to_string(),
+                update_endpoint: None,
+                update_schema: None,
+                read_endpoint: "/read".to_string(),
+                read_schema: "Read".to_string(),
+                read_response_schema: None,
+                delete_endpoint: "/delete".to_string(),
+                delete_schema: "Delete".to_string(),
+            },
+            attributes: vec![IacAttribute {
+                api_name: "mode".to_string(),
+                canonical_name: "mode".to_string(),
+                description: "Mode".to_string(),
+                iac_type: IacType::Enum {
+                    values: vec!["fast".into(), "slow".into()],
+                    underlying: Box::new(IacType::String),
+                },
+                required: true, computed: false, sensitive: false, immutable: false,
+                default_value: None, enum_values: None, read_path: None, update_only: false,
+            }],
+            identity: IdentityInfo {
+                id_field: "mode".to_string(),
+                import_field: "mode".to_string(),
+                force_replace_fields: vec![],
+            },
+        };
+
+        let output = generate_test_playbook(&resource, "test");
+        // Enum required field should use first enum value in the test playbook
+        assert!(output.contains("mode: \"fast\""));
+    }
+
+    #[test]
+    fn test_playbook_with_int_required_field() {
+        let resource = IacResource {
+            name: "test_item".to_string(),
+            description: "Item".to_string(),
+            category: "test".to_string(),
+            crud: CrudInfo {
+                create_endpoint: "/create".to_string(),
+                create_schema: "Create".to_string(),
+                update_endpoint: None,
+                update_schema: None,
+                read_endpoint: "/read".to_string(),
+                read_schema: "Read".to_string(),
+                read_response_schema: None,
+                delete_endpoint: "/delete".to_string(),
+                delete_schema: "Delete".to_string(),
+            },
+            attributes: vec![
+                IacAttribute {
+                    api_name: "count".to_string(),
+                    canonical_name: "count".to_string(),
+                    description: "Count".to_string(),
+                    iac_type: IacType::Integer,
+                    required: true, computed: false, sensitive: false, immutable: false,
+                    default_value: None, enum_values: None, read_path: None, update_only: false,
+                },
+                IacAttribute {
+                    api_name: "rate".to_string(),
+                    canonical_name: "rate".to_string(),
+                    description: "Rate".to_string(),
+                    iac_type: IacType::Float,
+                    required: true, computed: false, sensitive: false, immutable: false,
+                    default_value: None, enum_values: None, read_path: None, update_only: false,
+                },
+                IacAttribute {
+                    api_name: "enabled".to_string(),
+                    canonical_name: "enabled".to_string(),
+                    description: "Enabled".to_string(),
+                    iac_type: IacType::Boolean,
+                    required: true, computed: false, sensitive: false, immutable: false,
+                    default_value: None, enum_values: None, read_path: None, update_only: false,
+                },
+            ],
+            identity: IdentityInfo {
+                id_field: "count".to_string(),
+                import_field: "count".to_string(),
+                force_replace_fields: vec![],
+            },
+        };
+
+        let output = generate_test_playbook(&resource, "test");
+        assert!(output.contains("count: 1"));
+        assert!(output.contains("rate: 1.0"));
+        assert!(output.contains("enabled: true"));
+    }
+
+    #[test]
+    fn multiple_immutable_fields_listed_in_comment() {
+        let mut resource = sample_resource();
+        resource.attributes.push(IacAttribute {
+            api_name: "region".to_string(),
+            canonical_name: "region".to_string(),
+            description: "Region".to_string(),
+            iac_type: IacType::String,
+            required: true, computed: false, sensitive: false, immutable: true,
+            default_value: None, enum_values: None, read_path: None, update_only: false,
+        });
+        resource.attributes.push(IacAttribute {
+            api_name: "zone".to_string(),
+            canonical_name: "zone".to_string(),
+            description: "Zone".to_string(),
+            iac_type: IacType::String,
+            required: false, computed: false, sensitive: false, immutable: true,
+            default_value: None, enum_values: None, read_path: None, update_only: false,
+        });
+
+        let output = generate_resource_module(&resource, "test");
+        assert!(output.contains("- region"));
+        assert!(output.contains("- zone"));
+        assert!(output.contains("immutable after creation"));
+    }
 }
