@@ -7,6 +7,9 @@
 use iac_forge::{IacAttribute, IacDataSource, IacResource, IacType, strip_provider_prefix};
 
 /// Map an `IacType` to the Ansible argument_spec type string.
+///
+/// For `Enum` types, the underlying type is checked: if the underlying type
+/// is `Integer`, the Ansible type will be `'int'`, not `'str'`.
 #[must_use]
 pub fn iac_type_to_ansible(ty: &IacType) -> &'static str {
     match ty {
@@ -16,7 +19,7 @@ pub fn iac_type_to_ansible(ty: &IacType) -> &'static str {
         IacType::Boolean => "bool",
         IacType::List(_) | IacType::Set(_) => "list",
         IacType::Map(_) | IacType::Object { .. } => "dict",
-        IacType::Enum { .. } => "str",
+        IacType::Enum { underlying, .. } => iac_type_to_ansible(underlying),
         IacType::Any => "str",
     }
 }
@@ -132,6 +135,33 @@ fn state_spec_entry() -> &'static str {
     "        'state': {'type': 'str', 'choices': ['present', 'absent'], 'default': 'present'},"
 }
 
+/// Collect the names of immutable fields from attributes.
+fn immutable_field_names(attrs: &[IacAttribute]) -> Vec<&str> {
+    attrs
+        .iter()
+        .filter(|a| a.immutable)
+        .map(|a| a.canonical_name.as_str())
+        .collect()
+}
+
+/// Build a Python comment block listing immutable fields for `update_resource`.
+fn immutable_fields_comment(attrs: &[IacAttribute]) -> String {
+    let names = immutable_field_names(attrs);
+    if names.is_empty() {
+        return String::new();
+    }
+    let field_list = names
+        .iter()
+        .map(|n| format!("    #   - {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "\n    # WARNING: The following fields are immutable after creation.\n\
+         {field_list}\n\
+         \x20   # Changing them requires destroy + recreate.\n"
+    )
+}
+
 /// Generate a complete Python module for a resource.
 #[must_use]
 pub fn generate_resource_module(resource: &IacResource, provider_name: &str) -> String {
@@ -139,6 +169,7 @@ pub fn generate_resource_module(resource: &IacResource, provider_name: &str) -> 
     let options_yaml = build_options_yaml(&resource.attributes);
     let return_yaml = build_return_yaml(&resource.attributes);
     let argument_spec = build_argument_spec(&resource.attributes);
+    let immutable_comment = immutable_fields_comment(&resource.attributes);
 
     format!(
         r##"#!/usr/bin/python
@@ -184,33 +215,45 @@ from ansible.module_utils.basic import AnsibleModule
 
 def create_resource(module):
     """Create the resource."""
-    # TODO: implement API call
-    module.exit_json(changed=True, msg="{module_name} created")
+    try:
+        # TODO: implement API call
+        module.exit_json(changed=True, msg="{module_name} created")
+    except Exception as e:
+        module.fail_json(msg="Failed to create {module_name}: %s" % str(e))
 
 
 def update_resource(module):
-    """Update the resource."""
-    # TODO: implement API call
-    module.exit_json(changed=True, msg="{module_name} updated")
+    """Update the resource."""{immutable_comment}
+    try:
+        # TODO: implement API call
+        module.exit_json(changed=True, msg="{module_name} updated")
+    except Exception as e:
+        module.fail_json(msg="Failed to update {module_name}: %s" % str(e))
 
 
 def delete_resource(module):
     """Delete the resource."""
-    # TODO: implement API call
-    module.exit_json(changed=True, msg="{module_name} deleted")
+    try:
+        # TODO: implement API call
+        module.exit_json(changed=True, msg="{module_name} deleted")
+    except Exception as e:
+        module.fail_json(msg="Failed to delete {module_name}: %s" % str(e))
 
 
 def read_resource(module):
     """Read the current state of the resource."""
-    # TODO: implement API call
-    return None
+    try:
+        # TODO: implement API call
+        return None
+    except Exception as e:
+        module.fail_json(msg="Failed to read {module_name}: %s" % str(e))
 
 
 def main():
-    argument_spec = dict(
+    argument_spec = {{
 {state_spec}
 {argument_spec}
-    )
+    }}
 
     module = AnsibleModule(
         argument_spec=argument_spec,
@@ -245,6 +288,7 @@ if __name__ == '__main__':
         return_yaml = return_yaml,
         state_spec = state_spec_entry(),
         argument_spec = argument_spec,
+        immutable_comment = immutable_comment,
     )
 }
 
@@ -294,22 +338,28 @@ from ansible.module_utils.basic import AnsibleModule
 
 def read_resource(module):
     """Read the data source."""
-    # TODO: implement API call
-    return {{}}
+    try:
+        # TODO: implement API call
+        return {{}}
+    except Exception as e:
+        module.fail_json(msg="Failed to read {module_name}: %s" % str(e))
 
 
 def main():
-    argument_spec = dict(
+    argument_spec = {{
 {argument_spec}
-    )
+    }}
 
     module = AnsibleModule(
         argument_spec=argument_spec,
         supports_check_mode=True,
     )
 
-    result = read_resource(module)
-    module.exit_json(changed=False, **result)
+    try:
+        result = read_resource(module)
+        module.exit_json(changed=False, **result)
+    except Exception as e:
+        module.fail_json(msg=str(e))
 
 
 if __name__ == '__main__':
@@ -494,6 +544,25 @@ mod tests {
         }
     }
 
+    /// Helper to build a resource with an immutable field.
+    fn sample_resource_with_immutable() -> IacResource {
+        let mut resource = sample_resource();
+        resource.attributes.push(IacAttribute {
+            api_name: "region".to_string(),
+            canonical_name: "region".to_string(),
+            description: "The region for the secret".to_string(),
+            iac_type: IacType::String,
+            required: true,
+            computed: false,
+            sensitive: false,
+            immutable: true,
+            default_value: None,
+            enum_values: None,
+            read_path: None,
+        });
+        resource
+    }
+
     #[test]
     fn type_mappings() {
         assert_eq!(iac_type_to_ansible(&IacType::String), "str");
@@ -518,6 +587,17 @@ mod tests {
     }
 
     #[test]
+    fn enum_with_integer_underlying_maps_to_int() {
+        assert_eq!(
+            iac_type_to_ansible(&IacType::Enum {
+                values: vec!["1".into(), "2".into()],
+                underlying: Box::new(IacType::Integer),
+            }),
+            "int"
+        );
+    }
+
+    #[test]
     fn list_elements() {
         assert_eq!(
             list_elements_type(&IacType::List(Box::new(IacType::String))),
@@ -537,6 +617,54 @@ mod tests {
         assert!(output.contains("DOCUMENTATION = r'''"));
         assert!(output.contains("module: static_secret"));
         assert!(output.contains("short_description: Manage a static secret"));
+    }
+
+    #[test]
+    fn resource_module_uses_dict_literal_not_dict_call() {
+        let resource = sample_resource();
+        let output = generate_resource_module(&resource, "test");
+        // Must use dict literal `{...}`, not `dict(...)`.
+        assert!(
+            output.contains("argument_spec = {"),
+            "argument_spec must use dict literal syntax, got:\n{output}"
+        );
+        assert!(
+            !output.contains("argument_spec = dict("),
+            "argument_spec must NOT use dict() call syntax"
+        );
+    }
+
+    #[test]
+    fn data_source_module_uses_dict_literal_not_dict_call() {
+        let ds = IacDataSource {
+            name: "test_secret_info".to_string(),
+            description: "Get secret information".to_string(),
+            read_endpoint: "/read".to_string(),
+            read_schema: "ReadBody".to_string(),
+            read_response_schema: None,
+            attributes: vec![IacAttribute {
+                api_name: "name".to_string(),
+                canonical_name: "name".to_string(),
+                description: "Secret name".to_string(),
+                iac_type: IacType::String,
+                required: true,
+                computed: false,
+                sensitive: false,
+                immutable: false,
+                default_value: None,
+                enum_values: None,
+                read_path: None,
+            }],
+        };
+        let output = generate_data_source_module(&ds, "test");
+        assert!(
+            output.contains("argument_spec = {"),
+            "data source argument_spec must use dict literal syntax"
+        );
+        assert!(
+            !output.contains("argument_spec = dict("),
+            "data source argument_spec must NOT use dict() call syntax"
+        );
     }
 
     #[test]
@@ -627,5 +755,111 @@ mod tests {
         assert!(!output.contains("'secret_id':"));
         let return_section = &output[output.find("RETURN").unwrap()..];
         assert!(return_section.contains("secret_id"));
+    }
+
+    #[test]
+    fn resource_module_has_error_handling() {
+        let resource = sample_resource();
+        let output = generate_resource_module(&resource, "test");
+        // All CRUD functions should have try/except with module.fail_json
+        assert!(
+            output.contains("module.fail_json(msg=\"Failed to create"),
+            "create_resource must have fail_json error handling"
+        );
+        assert!(
+            output.contains("module.fail_json(msg=\"Failed to update"),
+            "update_resource must have fail_json error handling"
+        );
+        assert!(
+            output.contains("module.fail_json(msg=\"Failed to delete"),
+            "delete_resource must have fail_json error handling"
+        );
+        assert!(
+            output.contains("module.fail_json(msg=\"Failed to read"),
+            "read_resource must have fail_json error handling"
+        );
+    }
+
+    #[test]
+    fn data_source_module_has_error_handling() {
+        let ds = IacDataSource {
+            name: "test_secret_info".to_string(),
+            description: "Get secret information".to_string(),
+            read_endpoint: "/read".to_string(),
+            read_schema: "ReadBody".to_string(),
+            read_response_schema: None,
+            attributes: vec![],
+        };
+        let output = generate_data_source_module(&ds, "test");
+        assert!(
+            output.contains("module.fail_json("),
+            "data source must have fail_json error handling"
+        );
+    }
+
+    #[test]
+    fn immutable_fields_generate_update_comment() {
+        let resource = sample_resource_with_immutable();
+        let output = generate_resource_module(&resource, "test");
+        assert!(
+            output.contains("immutable after creation"),
+            "update_resource should warn about immutable fields"
+        );
+        assert!(
+            output.contains("- region"),
+            "update_resource should list immutable field 'region'"
+        );
+    }
+
+    #[test]
+    fn no_immutable_fields_no_comment() {
+        let resource = sample_resource();
+        let output = generate_resource_module(&resource, "test");
+        assert!(
+            !output.contains("immutable after creation"),
+            "should not have immutable comment when no fields are immutable"
+        );
+    }
+
+    #[test]
+    fn generated_python_has_valid_dict_syntax() {
+        // Regression test: generated Python must never use dict('key': ...)
+        // syntax, which is invalid. It must use dict literal {}.
+        let resource = sample_resource();
+        let output = generate_resource_module(&resource, "test");
+
+        // Check that argument_spec uses { ... } literal
+        let spec_start = output.find("argument_spec = {").expect("must have argument_spec = {");
+        let after_spec = &output[spec_start..];
+        // The closing brace should come before the next `module = AnsibleModule` line
+        assert!(
+            after_spec.contains("}"),
+            "argument_spec dict literal must have closing brace"
+        );
+
+        // Ensure no `dict(` anywhere in the main() function area
+        let main_fn = &output[output.find("def main():").unwrap()..];
+        assert!(
+            !main_fn.contains("dict("),
+            "main() must not contain dict() call syntax"
+        );
+    }
+
+    #[test]
+    fn data_source_returns_empty_dict() {
+        let ds = IacDataSource {
+            name: "test_info".to_string(),
+            description: "Test data source".to_string(),
+            read_endpoint: "/read".to_string(),
+            read_schema: "ReadBody".to_string(),
+            read_response_schema: None,
+            attributes: vec![],
+        };
+        let output = generate_data_source_module(&ds, "test");
+        // The data source read_resource should return {} (empty dict)
+        assert!(
+            output.contains("return {}"),
+            "data source read_resource must return empty dict {{}}, got:\n{output}"
+        );
     }
 }
