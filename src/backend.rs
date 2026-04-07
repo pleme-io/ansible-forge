@@ -25,6 +25,12 @@ impl AnsibleBackend {
     }
 }
 
+impl std::fmt::Display for AnsibleBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AnsibleBackend({})", self.platform())
+    }
+}
+
 /// Naming convention for Ansible modules.
 ///
 /// Uses `snake_case` for type names, field names, and file names.
@@ -403,6 +409,12 @@ mod tests {
         let from_default = AnsibleBackend::default();
         let from_new = AnsibleBackend::new();
         assert_eq!(from_default.platform(), from_new.platform());
+    }
+
+    #[test]
+    fn backend_display() {
+        let backend = AnsibleBackend::new();
+        assert_eq!(backend.to_string(), "AnsibleBackend(ansible)");
     }
 
     #[test]
