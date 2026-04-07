@@ -424,4 +424,88 @@ mod tests {
         let from_new = AnsibleBackend::new();
         assert_eq!(from_default.platform(), from_new.platform());
     }
+
+    #[test]
+    fn naming_convention_hyphenated_resource_type() {
+        let naming = AnsibleNaming;
+        assert_eq!(
+            naming.resource_type_name("mycloud_my-resource", "mycloud"),
+            "my_resource"
+        );
+    }
+
+    #[test]
+    fn naming_convention_empty_field_name() {
+        let naming = AnsibleNaming;
+        assert_eq!(naming.field_name(""), "");
+    }
+
+    #[test]
+    fn naming_convention_field_name_already_snake_case() {
+        let naming = AnsibleNaming;
+        assert_eq!(naming.field_name("already_snake"), "already_snake");
+    }
+
+    #[test]
+    fn generate_resource_content_has_module_name() {
+        let backend = AnsibleBackend::new();
+        let provider = sample_provider();
+        let resource = sample_resource();
+        let artifacts = backend.generate_resource(&resource, &provider).unwrap();
+        let content = &artifacts[0].content;
+        assert!(content.contains("module: instance"));
+        assert!(content.contains("DOCUMENTATION"));
+        assert!(content.contains("EXAMPLES"));
+        assert!(content.contains("RETURN"));
+        assert!(content.contains("def main():"));
+    }
+
+    #[test]
+    fn generate_data_source_content_has_info_module() {
+        let backend = AnsibleBackend::new();
+        let provider = sample_provider();
+        let ds = IacDataSource {
+            name: "mycloud_secret".to_string(),
+            description: "Get secret info".to_string(),
+            read_endpoint: "/secrets".to_string(),
+            read_schema: "ReadSecret".to_string(),
+            read_response_schema: None,
+            attributes: vec![],
+        };
+        let artifacts = backend.generate_data_source(&ds, &provider).unwrap();
+        let content = &artifacts[0].content;
+        assert!(content.contains("module: secret_info"));
+        assert!(!content.contains("state"));
+    }
+
+    #[test]
+    fn generate_test_content_has_playbook_structure() {
+        let backend = AnsibleBackend::new();
+        let provider = sample_provider();
+        let resource = sample_resource();
+        let artifacts = backend.generate_test(&resource, &provider).unwrap();
+        let content = &artifacts[0].content;
+        assert!(content.starts_with("---"));
+        assert!(content.contains("hosts: localhost"));
+        assert!(content.contains("tasks:"));
+    }
+
+    #[test]
+    fn file_name_data_source_normalizes() {
+        let naming = AnsibleNaming;
+        assert_eq!(
+            naming.file_name("my-data", &ArtifactKind::DataSource),
+            "my_data_info.py"
+        );
+    }
+
+    #[test]
+    fn generate_resource_with_hyphenated_name() {
+        let backend = AnsibleBackend::new();
+        let provider = sample_provider();
+        let mut resource = sample_resource();
+        resource.name = "mycloud_my-resource".to_string();
+        let artifacts = backend.generate_resource(&resource, &provider).unwrap();
+        assert_eq!(artifacts[0].path, "plugins/modules/my_resource.py");
+    }
 }
