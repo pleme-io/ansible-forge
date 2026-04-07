@@ -6,21 +6,20 @@
 
 use iac_forge::{IacAttribute, IacDataSource, IacResource, IacType, strip_provider_prefix};
 
-/// Map an `IacType` to the Ansible argument_spec type string.
+/// Map an `IacType` to the Ansible `argument_spec` type string.
 ///
 /// For `Enum` types, the underlying type is checked: if the underlying type
 /// is `Integer`, the Ansible type will be `'int'`, not `'str'`.
 #[must_use]
 pub fn iac_type_to_ansible(ty: &IacType) -> &'static str {
     match ty {
-        IacType::String => "str",
+        IacType::String | IacType::Any => "str",
         IacType::Integer => "int",
         IacType::Float => "float",
         IacType::Boolean => "bool",
         IacType::List(_) | IacType::Set(_) => "list",
         IacType::Map(_) | IacType::Object { .. } => "dict",
         IacType::Enum { underlying, .. } => iac_type_to_ansible(underlying),
-        IacType::Any => "str",
     }
 }
 
@@ -59,11 +58,11 @@ fn build_options_yaml(attrs: &[IacAttribute]) -> String {
             let choices: Vec<String> = values.iter().map(|v| format!("\"{v}\"")).collect();
             lines.push(format!("      choices: [{}]", choices.join(", ")));
         }
-        if let Some(ref ev) = attr.enum_values {
-            if !matches!(&attr.iac_type, IacType::Enum { .. }) {
-                let choices: Vec<String> = ev.iter().map(|v| format!("\"{v}\"")).collect();
-                lines.push(format!("      choices: [{}]", choices.join(", ")));
-            }
+        if let Some(ref ev) = attr.enum_values
+            && !matches!(&attr.iac_type, IacType::Enum { .. })
+        {
+            let choices: Vec<String> = ev.iter().map(|v| format!("\"{v}\"")).collect();
+            lines.push(format!("      choices: [{}]", choices.join(", ")));
         }
     }
     lines.join("\n")
@@ -115,11 +114,11 @@ fn build_argument_spec(attrs: &[IacAttribute]) -> String {
             let choices: Vec<String> = values.iter().map(|v| format!("'{v}'")).collect();
             parts.push(format!("'choices': [{}]", choices.join(", ")));
         }
-        if let Some(ref ev) = attr.enum_values {
-            if !matches!(&attr.iac_type, IacType::Enum { .. }) {
-                let choices: Vec<String> = ev.iter().map(|v| format!("'{v}'")).collect();
-                parts.push(format!("'choices': [{}]", choices.join(", ")));
-            }
+        if let Some(ref ev) = attr.enum_values
+            && !matches!(&attr.iac_type, IacType::Enum { .. })
+        {
+            let choices: Vec<String> = ev.iter().map(|v| format!("'{v}'")).collect();
+            parts.push(format!("'choices': [{}]", choices.join(", ")));
         }
         entries.push(format!(
             "        '{}': {{{}}},",
@@ -162,17 +161,18 @@ fn immutable_fields_comment(attrs: &[IacAttribute]) -> String {
     )
 }
 
-/// Generate a complete Python module for a resource.
-#[must_use]
-pub fn generate_resource_module(resource: &IacResource, provider_name: &str) -> String {
-    let module_name = strip_provider_prefix(&resource.name, provider_name);
-    let options_yaml = build_options_yaml(&resource.attributes);
-    let return_yaml = build_return_yaml(&resource.attributes);
-    let argument_spec = build_argument_spec(&resource.attributes);
-    let immutable_comment = immutable_fields_comment(&resource.attributes);
-
+/// Format the Python source for a resource module from pre-built fragments.
+fn format_resource_python(
+    module_name: &str,
+    description: &str,
+    options_yaml: &str,
+    return_yaml: &str,
+    argument_spec: &str,
+    immutable_comment: &str,
+) -> String {
+    let state_spec = state_spec_entry();
     format!(
-        r##"#!/usr/bin/python
+        r#"#!/usr/bin/python
 # -*- coding: utf-8 -*-
 
 # Copyright: (c) 2026, pleme-io
@@ -281,14 +281,27 @@ def main():
 
 if __name__ == '__main__':
     main()
-"##,
-        module_name = module_name,
-        description = resource.description.replace('"', "'"),
-        options_yaml = options_yaml,
-        return_yaml = return_yaml,
-        state_spec = state_spec_entry(),
-        argument_spec = argument_spec,
-        immutable_comment = immutable_comment,
+"#
+    )
+}
+
+/// Generate a complete Python module for a resource.
+#[must_use]
+pub fn generate_resource_module(resource: &IacResource, provider_name: &str) -> String {
+    let module_name = strip_provider_prefix(&resource.name, provider_name);
+    let description = resource.description.replace('"', "'");
+    let options_yaml = build_options_yaml(&resource.attributes);
+    let return_yaml = build_return_yaml(&resource.attributes);
+    let argument_spec = build_argument_spec(&resource.attributes);
+    let immutable_comment = immutable_fields_comment(&resource.attributes);
+
+    format_resource_python(
+        module_name,
+        &description,
+        &options_yaml,
+        &return_yaml,
+        &argument_spec,
+        &immutable_comment,
     )
 }
 
@@ -304,7 +317,7 @@ pub fn generate_data_source_module(ds: &IacDataSource, provider_name: &str) -> S
     let argument_spec = build_argument_spec(&ds.attributes);
 
     format!(
-        r##"#!/usr/bin/python
+        r#"#!/usr/bin/python
 # -*- coding: utf-8 -*-
 
 # Copyright: (c) 2026, pleme-io
@@ -364,7 +377,7 @@ def main():
 
 if __name__ == '__main__':
     main()
-"##,
+"#,
         module_name = module_name,
         description = ds.description.replace('"', "'"),
         options_yaml = options_yaml,
@@ -382,7 +395,6 @@ pub fn generate_test_playbook(resource: &IacResource, provider_name: &str) -> St
     for attr in &resource.attributes {
         if attr.required {
             let value = match &attr.iac_type {
-                IacType::String => "\"test_value\"".to_string(),
                 IacType::Integer => "1".to_string(),
                 IacType::Float => "1.0".to_string(),
                 IacType::Boolean => "true".to_string(),
@@ -406,7 +418,7 @@ pub fn generate_test_playbook(resource: &IacResource, provider_name: &str) -> St
     };
 
     format!(
-        r#"---
+        r"---
 # Integration test for {module_name}
 
 - name: Test {module_name} module
@@ -439,9 +451,7 @@ pub fn generate_test_playbook(resource: &IacResource, provider_name: &str) -> St
       ansible.builtin.assert:
         that:
           - delete_result.changed
-"#,
-        module_name = module_name,
-        params_block = params_block,
+"
     )
 }
 
