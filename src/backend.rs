@@ -126,7 +126,7 @@ impl Backend for AnsibleBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iac_forge::{AuthInfo, CrudInfo, IacAttribute, IacType, IdentityInfo};
+    use iac_forge::{AuthInfo, CrudInfo, IacType, IdentityInfo, TestAttributeBuilder};
     use std::collections::HashMap;
 
     fn sample_provider() -> IacProvider {
@@ -157,34 +157,14 @@ mod tests {
                 delete_schema: "DeleteInstance".to_string(),
             },
             attributes: vec![
-                IacAttribute {
-                    api_name: "instance-name".to_string(),
-                    canonical_name: "instance_name".to_string(),
-                    description: "Name of the instance".to_string(),
-                    iac_type: IacType::String,
-                    required: true,
-                    computed: false,
-                    sensitive: false,
-                    immutable: false,
-                    default_value: None,
-                    enum_values: None,
-                    read_path: None,
-                    update_only: false,
-                },
-                IacAttribute {
-                    api_name: "instance-id".to_string(),
-                    canonical_name: "instance_id".to_string(),
-                    description: "ID of the instance".to_string(),
-                    iac_type: IacType::String,
-                    required: false,
-                    computed: true,
-                    sensitive: false,
-                    immutable: false,
-                    default_value: None,
-                    enum_values: None,
-                    read_path: None,
-                    update_only: false,
-                },
+                TestAttributeBuilder::new("instance-name", IacType::String)
+                    .required()
+                    .description("Name of the instance")
+                    .build(),
+                TestAttributeBuilder::new("instance-id", IacType::String)
+                    .computed()
+                    .description("ID of the instance")
+                    .build(),
             ],
             identity: IdentityInfo {
                 id_field: "instance_id".to_string(),
