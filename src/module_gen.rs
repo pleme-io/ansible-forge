@@ -15,11 +15,13 @@ pub trait AnsibleTypeExt {
     ///
     /// For `Enum` types the underlying type is inspected, so an enum over
     /// integers maps to `"int"`, not `"str"`.
+    #[must_use]
     fn ansible_type(&self) -> &'static str;
 
     /// Element type string for list/set types (e.g. `"str"` for `List(String)`).
     ///
     /// Returns `None` for non-collection types.
+    #[must_use]
     fn ansible_elements(&self) -> Option<&'static str>;
 }
 
@@ -74,14 +76,11 @@ fn format_choices(values: &[String], quote: char) -> String {
 ///
 /// Prefers `IacType::Enum` values; falls back to `attr.enum_values` when the
 /// type is not already an enum.
-fn effective_choices(attr: &IacAttribute) -> Option<&Vec<String>> {
+fn effective_choices(attr: &IacAttribute) -> Option<&[String]> {
     if let IacType::Enum { values, .. } = &attr.iac_type {
         return Some(values);
     }
-    if let Some(ref ev) = attr.enum_values {
-        return Some(ev);
-    }
-    None
+    attr.enum_values.as_deref()
 }
 
 /// Standard Python file header for generated Ansible modules.
@@ -934,7 +933,7 @@ mod tests {
         let after_spec = &output[spec_start..];
         // The closing brace should come before the next `module = AnsibleModule` line
         assert!(
-            after_spec.contains("}"),
+            after_spec.contains('}'),
             "argument_spec dict literal must have closing brace"
         );
 
@@ -964,7 +963,8 @@ mod tests {
         );
     }
 
-    /// Resource with ALL IacType variants.
+    /// Resource with ALL `IacType` variants.
+    #[allow(clippy::too_many_lines)]
     fn resource_with_all_types() -> IacResource {
         IacResource {
             name: "test_all_types".to_string(),
@@ -1237,10 +1237,11 @@ mod tests {
 
         // Verify module content is valid
         for artifact in &artifacts {
-            if artifact.path.ends_with(".py") {
+            let path = std::path::Path::new(&artifact.path);
+            if path.extension().is_some_and(|ext| ext == "py") {
                 assert!(artifact.content.contains("AnsibleModule"));
             }
-            if artifact.path.ends_with(".yml") {
+            if path.extension().is_some_and(|ext| ext == "yml") {
                 assert!(artifact.content.contains("state: present"));
             }
         }
