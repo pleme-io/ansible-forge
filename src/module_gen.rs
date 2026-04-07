@@ -320,22 +320,40 @@ if __name__ == '__main__':
     )
 }
 
+/// Pre-built YAML and Python fragments derived from attributes.
+///
+/// Consolidates the attribute-to-fragments pipeline shared by both
+/// resource and data source module generators.
+struct ModuleFragments {
+    options_yaml: String,
+    return_yaml: String,
+    argument_spec: String,
+}
+
+impl ModuleFragments {
+    fn from_attributes(attrs: &[IacAttribute]) -> Self {
+        Self {
+            options_yaml: build_options_yaml(attrs),
+            return_yaml: build_return_yaml(attrs),
+            argument_spec: build_argument_spec(attrs),
+        }
+    }
+}
+
 /// Generate a complete Python module for a resource.
 #[must_use]
 pub fn generate_resource_module(resource: &IacResource, provider_name: &str) -> String {
     let module_name = strip_provider_prefix(&resource.name, provider_name);
     let description = resource.description.replace('"', "'");
-    let options_yaml = build_options_yaml(&resource.attributes);
-    let return_yaml = build_return_yaml(&resource.attributes);
-    let argument_spec = build_argument_spec(&resource.attributes);
+    let frags = ModuleFragments::from_attributes(&resource.attributes);
     let immutable_comment = immutable_fields_comment(resource);
 
     format_resource_python(
         module_name,
         &description,
-        &options_yaml,
-        &return_yaml,
-        &argument_spec,
+        &frags.options_yaml,
+        &frags.return_yaml,
+        &frags.argument_spec,
         &immutable_comment,
     )
 }
@@ -347,12 +365,13 @@ pub fn generate_data_source_module(ds: &IacDataSource, provider_name: &str) -> S
         "{}_info",
         strip_provider_prefix(&ds.name, provider_name)
     );
-    let options_yaml = build_options_yaml(&ds.attributes);
-    let return_yaml = build_return_yaml(&ds.attributes);
-    let argument_spec = build_argument_spec(&ds.attributes);
+    let frags = ModuleFragments::from_attributes(&ds.attributes);
 
     let header = PYTHON_HEADER;
     let description = ds.description.replace('"', "'");
+    let options_yaml = &frags.options_yaml;
+    let return_yaml = &frags.return_yaml;
+    let argument_spec = &frags.argument_spec;
     format!(
         r#"{header}
 
