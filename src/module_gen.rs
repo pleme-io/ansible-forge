@@ -115,23 +115,25 @@ fn build_options_yaml(attrs: &[IacAttribute]) -> String {
 
 /// Build a YAML `RETURN` block from computed attributes.
 fn build_return_yaml(attrs: &[IacAttribute]) -> String {
-    let mut lines = Vec::new();
-    for attr in attrs {
-        if !attr.computed {
-            continue;
-        }
-        lines.push(format!("{}:", attr.canonical_name));
-        lines.push(format!(
-            "  description: \"{}\"",
-            attr.description.replace('"', "'")
-        ));
-        lines.push(format!("  type: {}", attr.iac_type.ansible_type()));
-        lines.push("  returned: success".to_string());
+    let block: String = attrs
+        .iter()
+        .filter(|a| a.computed)
+        .flat_map(|attr| {
+            [
+                format!("{}:", attr.canonical_name),
+                format!("  description: \"{}\"", attr.description.replace('"', "'")),
+                format!("  type: {}", attr.iac_type.ansible_type()),
+                "  returned: success".to_string(),
+            ]
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if block.is_empty() {
+        "# No computed fields".to_string()
+    } else {
+        block
     }
-    if lines.is_empty() {
-        lines.push("# No computed fields".to_string());
-    }
-    lines.join("\n")
 }
 
 /// Build the Python `argument_spec` dict from attributes.
@@ -415,30 +417,33 @@ if __name__ == '__main__':
     )
 }
 
+/// Produce a representative YAML test value for a given `IacType`.
+fn test_value_for_type(ty: &IacType) -> String {
+    match ty {
+        IacType::Integer => "1".to_string(),
+        IacType::Float => "1.0".to_string(),
+        IacType::Boolean => "true".to_string(),
+        IacType::Enum { values, .. } => values
+            .first()
+            .map_or_else(|| "\"\"".to_string(), |v| format!("\"{v}\"")),
+        _ => "\"test_value\"".to_string(),
+    }
+}
+
 /// Generate a YAML integration test for a resource.
 #[must_use]
 pub fn generate_test_playbook(resource: &IacResource, provider_name: &str) -> String {
     let module_name = strip_provider_prefix(&resource.name, provider_name);
 
-    let mut task_params = Vec::new();
-    for attr in &resource.attributes {
-        if attr.required {
-            let value = match &attr.iac_type {
-                IacType::Integer => "1".to_string(),
-                IacType::Float => "1.0".to_string(),
-                IacType::Boolean => "true".to_string(),
-                IacType::Enum { values, .. } => {
-                    if let Some(first) = values.first() {
-                        format!("\"{first}\"")
-                    } else {
-                        "\"\"".to_string()
-                    }
-                }
-                _ => "\"test_value\"".to_string(),
-            };
-            task_params.push(format!("        {}: {}", attr.canonical_name, value));
-        }
-    }
+    let task_params: Vec<String> = resource
+        .attributes
+        .iter()
+        .filter(|a| a.required)
+        .map(|attr| {
+            let value = test_value_for_type(&attr.iac_type);
+            format!("        {}: {value}", attr.canonical_name)
+        })
+        .collect();
 
     let params_block = if task_params.is_empty() {
         String::new()
@@ -738,6 +743,33 @@ mod tests {
             update_only: false,
         };
         assert!(effective_choices(&attr).is_none());
+    }
+
+    #[test]
+    fn test_value_for_type_covers_all_variants() {
+        assert_eq!(test_value_for_type(&IacType::Integer), "1");
+        assert_eq!(test_value_for_type(&IacType::Float), "1.0");
+        assert_eq!(test_value_for_type(&IacType::Boolean), "true");
+        assert_eq!(test_value_for_type(&IacType::String), "\"test_value\"");
+        assert_eq!(test_value_for_type(&IacType::Any), "\"test_value\"");
+        assert_eq!(
+            test_value_for_type(&IacType::List(Box::new(IacType::String))),
+            "\"test_value\""
+        );
+        assert_eq!(
+            test_value_for_type(&IacType::Enum {
+                values: vec!["a".into(), "b".into()],
+                underlying: Box::new(IacType::String),
+            }),
+            "\"a\""
+        );
+        assert_eq!(
+            test_value_for_type(&IacType::Enum {
+                values: vec![],
+                underlying: Box::new(IacType::String),
+            }),
+            "\"\""
+        );
     }
 
     #[test]
