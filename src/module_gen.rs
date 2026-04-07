@@ -94,11 +94,16 @@ const PYTHON_HEADER: &str = "\
 from __future__ import absolute_import, division, print_function
 __metaclass__ = type";
 
+/// Whether an attribute is a user-facing input (not purely computed).
+fn is_input_attr(attr: &IacAttribute) -> bool {
+    !attr.computed || attr.required
+}
+
 /// Build a YAML `options:` block from attributes.
 fn build_options_yaml(attrs: &[IacAttribute]) -> String {
     let mut lines = Vec::new();
     for attr in attrs {
-        if attr.computed && !attr.required {
+        if !is_input_attr(attr) {
             continue;
         }
         lines.push(format!("    {}:", attr.canonical_name));
@@ -150,7 +155,7 @@ fn build_return_yaml(attrs: &[IacAttribute]) -> String {
 fn build_argument_spec(attrs: &[IacAttribute]) -> String {
     let mut entries = Vec::new();
     for attr in attrs {
-        if attr.computed && !attr.required {
+        if !is_input_attr(attr) {
             continue;
         }
         let mut parts = Vec::new();
