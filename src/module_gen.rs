@@ -161,18 +161,9 @@ fn state_spec_entry() -> &'static str {
     "        'state': {'type': 'str', 'choices': ['present', 'absent'], 'default': 'present'},"
 }
 
-/// Collect the names of immutable fields from attributes.
-fn immutable_field_names(attrs: &[IacAttribute]) -> Vec<&str> {
-    attrs
-        .iter()
-        .filter(|a| a.immutable)
-        .map(|a| a.canonical_name.as_str())
-        .collect()
-}
-
 /// Build a Python comment block listing immutable fields for `update_resource`.
-fn immutable_fields_comment(attrs: &[IacAttribute]) -> String {
-    let names = immutable_field_names(attrs);
+fn immutable_fields_comment(resource: &IacResource) -> String {
+    let names = resource.immutable_attribute_names();
     if names.is_empty() {
         return String::new();
     }
@@ -320,7 +311,7 @@ pub fn generate_resource_module(resource: &IacResource, provider_name: &str) -> 
     let options_yaml = build_options_yaml(&resource.attributes);
     let return_yaml = build_return_yaml(&resource.attributes);
     let argument_spec = build_argument_spec(&resource.attributes);
-    let immutable_comment = immutable_fields_comment(&resource.attributes);
+    let immutable_comment = immutable_fields_comment(resource);
 
     format_resource_python(
         module_name,
@@ -2479,7 +2470,8 @@ mod tests {
 
     #[test]
     fn immutable_field_names_collects_only_immutable() {
-        let attrs = vec![
+        let mut resource = sample_resource();
+        resource.attributes = vec![
             IacAttribute {
                 api_name: "region".to_string(),
                 canonical_name: "region".to_string(),
@@ -2497,13 +2489,14 @@ mod tests {
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             },
         ];
-        let names = immutable_field_names(&attrs);
+        let names = resource.immutable_attribute_names();
         assert_eq!(names, vec!["region"]);
     }
 
     #[test]
     fn immutable_field_names_empty_when_none_immutable() {
-        let attrs = vec![IacAttribute {
+        let mut resource = sample_resource();
+        resource.attributes = vec![IacAttribute {
             api_name: "name".to_string(),
             canonical_name: "name".to_string(),
             description: "Name".to_string(),
@@ -2511,13 +2504,14 @@ mod tests {
             required: true, computed: false, sensitive: false, immutable: false,
             default_value: None, enum_values: None, read_path: None, update_only: false,
         }];
-        let names = immutable_field_names(&attrs);
+        let names = resource.immutable_attribute_names();
         assert!(names.is_empty());
     }
 
     #[test]
     fn immutable_fields_comment_empty_when_no_immutable() {
-        let attrs = vec![IacAttribute {
+        let mut resource = sample_resource();
+        resource.attributes = vec![IacAttribute {
             api_name: "name".to_string(),
             canonical_name: "name".to_string(),
             description: "Name".to_string(),
@@ -2525,13 +2519,14 @@ mod tests {
             required: true, computed: false, sensitive: false, immutable: false,
             default_value: None, enum_values: None, read_path: None, update_only: false,
         }];
-        let comment = immutable_fields_comment(&attrs);
+        let comment = immutable_fields_comment(&resource);
         assert!(comment.is_empty());
     }
 
     #[test]
     fn immutable_fields_comment_lists_fields() {
-        let attrs = vec![
+        let mut resource = sample_resource();
+        resource.attributes = vec![
             IacAttribute {
                 api_name: "region".to_string(),
                 canonical_name: "region".to_string(),
@@ -2549,7 +2544,7 @@ mod tests {
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             },
         ];
-        let comment = immutable_fields_comment(&attrs);
+        let comment = immutable_fields_comment(&resource);
         assert!(comment.contains("immutable after creation"));
         assert!(comment.contains("- region"));
         assert!(comment.contains("- zone"));
