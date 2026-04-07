@@ -59,6 +59,31 @@ pub fn list_elements_type(ty: &IacType) -> Option<&'static str> {
     ty.ansible_elements()
 }
 
+/// Format a bracketed choices list from string values.
+///
+/// `quote` is the quote character to wrap each value (`'"'` for YAML, `'\''` for Python).
+fn format_choices(values: &[String], quote: char) -> String {
+    values
+        .iter()
+        .map(|v| format!("{quote}{v}{quote}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Collect the effective choices for an attribute, if any.
+///
+/// Prefers `IacType::Enum` values; falls back to `attr.enum_values` when the
+/// type is not already an enum.
+fn effective_choices(attr: &IacAttribute) -> Option<&Vec<String>> {
+    if let IacType::Enum { values, .. } = &attr.iac_type {
+        return Some(values);
+    }
+    if let Some(ref ev) = attr.enum_values {
+        return Some(ev);
+    }
+    None
+}
+
 /// Build a YAML `options:` block from attributes.
 fn build_options_yaml(attrs: &[IacAttribute]) -> String {
     let mut lines = Vec::new();
@@ -81,15 +106,8 @@ fn build_options_yaml(attrs: &[IacAttribute]) -> String {
         if let Some(elems) = attr.iac_type.ansible_elements() {
             lines.push(format!("      elements: {elems}"));
         }
-        if let IacType::Enum { values, .. } = &attr.iac_type {
-            let choices: Vec<String> = values.iter().map(|v| format!("\"{v}\"")).collect();
-            lines.push(format!("      choices: [{}]", choices.join(", ")));
-        }
-        if let Some(ref ev) = attr.enum_values
-            && !matches!(&attr.iac_type, IacType::Enum { .. })
-        {
-            let choices: Vec<String> = ev.iter().map(|v| format!("\"{v}\"")).collect();
-            lines.push(format!("      choices: [{}]", choices.join(", ")));
+        if let Some(values) = effective_choices(attr) {
+            lines.push(format!("      choices: [{}]", format_choices(values, '"')));
         }
     }
     lines.join("\n")
@@ -137,15 +155,8 @@ fn build_argument_spec(attrs: &[IacAttribute]) -> String {
         if let Some(elems) = attr.iac_type.ansible_elements() {
             parts.push(format!("'elements': '{elems}'"));
         }
-        if let IacType::Enum { values, .. } = &attr.iac_type {
-            let choices: Vec<String> = values.iter().map(|v| format!("'{v}'")).collect();
-            parts.push(format!("'choices': [{}]", choices.join(", ")));
-        }
-        if let Some(ref ev) = attr.enum_values
-            && !matches!(&attr.iac_type, IacType::Enum { .. })
-        {
-            let choices: Vec<String> = ev.iter().map(|v| format!("'{v}'")).collect();
-            parts.push(format!("'choices': [{}]", choices.join(", ")));
+        if let Some(values) = effective_choices(attr) {
+            parts.push(format!("'choices': [{}]", format_choices(values, '\'')));
         }
         entries.push(format!(
             "        '{}': {{{}}},",
@@ -668,6 +679,65 @@ mod tests {
             assert_eq!(ty.ansible_type(), iac_type_to_ansible(ty));
             assert_eq!(ty.ansible_elements(), list_elements_type(ty));
         }
+    }
+
+    #[test]
+    fn format_choices_produces_quoted_bracket_list() {
+        let vals = vec!["a".into(), "b".into(), "c".into()];
+        assert_eq!(format_choices(&vals, '\''), "'a', 'b', 'c'");
+        assert_eq!(format_choices(&vals, '"'), "\"a\", \"b\", \"c\"");
+        assert_eq!(format_choices(&[], '"'), "");
+    }
+
+    #[test]
+    fn effective_choices_prefers_enum_type() {
+        let attr = IacAttribute {
+            api_name: "t".into(),
+            canonical_name: "t".into(),
+            description: String::new(),
+            iac_type: IacType::Enum {
+                values: vec!["x".into()],
+                underlying: Box::new(IacType::String),
+            },
+            required: false, computed: false, sensitive: false, immutable: false,
+            default_value: None,
+            enum_values: Some(vec!["y".into()]),
+            read_path: None,
+            update_only: false,
+        };
+        assert_eq!(effective_choices(&attr).unwrap(), &["x".to_string()]);
+    }
+
+    #[test]
+    fn effective_choices_falls_back_to_enum_values() {
+        let attr = IacAttribute {
+            api_name: "t".into(),
+            canonical_name: "t".into(),
+            description: String::new(),
+            iac_type: IacType::String,
+            required: false, computed: false, sensitive: false, immutable: false,
+            default_value: None,
+            enum_values: Some(vec!["a".into(), "b".into()]),
+            read_path: None,
+            update_only: false,
+        };
+        assert_eq!(effective_choices(&attr).unwrap(), &["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn effective_choices_returns_none_when_absent() {
+        let attr = IacAttribute {
+            api_name: "t".into(),
+            canonical_name: "t".into(),
+            description: String::new(),
+            iac_type: IacType::String,
+            required: false, computed: false, sensitive: false, immutable: false,
+            default_value: None,
+            enum_values: None,
+            read_path: None,
+            update_only: false,
+        };
+        assert!(effective_choices(&attr).is_none());
     }
 
     #[test]
