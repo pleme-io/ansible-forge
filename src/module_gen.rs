@@ -84,6 +84,17 @@ fn effective_choices(attr: &IacAttribute) -> Option<&Vec<String>> {
     None
 }
 
+/// Standard Python file header for generated Ansible modules.
+const PYTHON_HEADER: &str = "\
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+# Copyright: (c) 2026, pleme-io
+# MIT License
+
+from __future__ import absolute_import, division, print_function
+__metaclass__ = type";
+
 /// Build a YAML `options:` block from attributes.
 fn build_options_yaml(attrs: &[IacAttribute]) -> String {
     let mut lines = Vec::new();
@@ -202,15 +213,9 @@ fn format_resource_python(
     immutable_comment: &str,
 ) -> String {
     let state_spec = state_spec_entry();
+    let header = PYTHON_HEADER;
     format!(
-        r#"#!/usr/bin/python
-# -*- coding: utf-8 -*-
-
-# Copyright: (c) 2026, pleme-io
-# MIT License
-
-from __future__ import absolute_import, division, print_function
-__metaclass__ = type
+        r#"{header}
 
 DOCUMENTATION = r'''
 ---
@@ -347,15 +352,10 @@ pub fn generate_data_source_module(ds: &IacDataSource, provider_name: &str) -> S
     let return_yaml = build_return_yaml(&ds.attributes);
     let argument_spec = build_argument_spec(&ds.attributes);
 
+    let header = PYTHON_HEADER;
+    let description = ds.description.replace('"', "'");
     format!(
-        r#"#!/usr/bin/python
-# -*- coding: utf-8 -*-
-
-# Copyright: (c) 2026, pleme-io
-# MIT License
-
-from __future__ import absolute_import, division, print_function
-__metaclass__ = type
+        r#"{header}
 
 DOCUMENTATION = r'''
 ---
@@ -408,12 +408,7 @@ def main():
 
 if __name__ == '__main__':
     main()
-"#,
-        module_name = module_name,
-        description = ds.description.replace('"', "'"),
-        options_yaml = options_yaml,
-        return_yaml = return_yaml,
-        argument_spec = argument_spec,
+"#
     )
 }
 
