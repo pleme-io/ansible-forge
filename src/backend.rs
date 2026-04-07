@@ -26,8 +26,11 @@ impl AnsibleBackend {
 }
 
 /// Naming convention for Ansible modules.
+///
+/// Uses `snake_case` for type names, field names, and file names.
+/// Strips the provider prefix from resource names.
 #[derive(Debug, Default)]
-pub struct AnsibleNaming;
+pub(crate) struct AnsibleNaming;
 
 impl NamingConvention for AnsibleNaming {
     fn resource_type_name(&self, resource_name: &str, provider_name: &str) -> String {
