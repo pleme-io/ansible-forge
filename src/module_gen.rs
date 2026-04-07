@@ -487,7 +487,7 @@ pub fn generate_test_playbook(resource: &IacResource, provider_name: &str) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iac_forge::{CrudInfo, IdentityInfo};
+    use iac_forge::{CrudInfo, IdentityInfo, TestAttributeBuilder};
 
     fn sample_resource() -> IacResource {
         IacResource {
@@ -506,79 +506,28 @@ mod tests {
                 delete_schema: "DeleteBody".to_string(),
             },
             attributes: vec![
-                IacAttribute {
-                    api_name: "name".to_string(),
-                    canonical_name: "name".to_string(),
-                    description: "The name of the secret".to_string(),
-                    iac_type: IacType::String,
-                    required: true,
-                    computed: false,
-                    sensitive: false,
-                    immutable: false,
-                    default_value: None,
-                    enum_values: None,
-                    read_path: None,
-                    update_only: false,
-                },
-                IacAttribute {
-                    api_name: "value".to_string(),
-                    canonical_name: "value".to_string(),
-                    description: "The secret value".to_string(),
-                    iac_type: IacType::String,
-                    required: true,
-                    computed: false,
-                    sensitive: true,
-                    immutable: false,
-                    default_value: None,
-                    enum_values: None,
-                    read_path: None,
-                    update_only: false,
-                },
-                IacAttribute {
-                    api_name: "tags".to_string(),
-                    canonical_name: "tags".to_string(),
-                    description: "Resource tags".to_string(),
-                    iac_type: IacType::List(Box::new(IacType::String)),
-                    required: false,
-                    computed: false,
-                    sensitive: false,
-                    immutable: false,
-                    default_value: None,
-                    enum_values: None,
-                    read_path: None,
-                    update_only: false,
-                },
-                IacAttribute {
-                    api_name: "secret_id".to_string(),
-                    canonical_name: "secret_id".to_string(),
-                    description: "The ID of the secret".to_string(),
-                    iac_type: IacType::String,
-                    required: false,
-                    computed: true,
-                    sensitive: false,
-                    immutable: false,
-                    default_value: None,
-                    enum_values: None,
-                    read_path: None,
-                    update_only: false,
-                },
-                IacAttribute {
-                    api_name: "protection_type".to_string(),
-                    canonical_name: "protection_type".to_string(),
-                    description: "The type of protection".to_string(),
-                    iac_type: IacType::Enum {
-                        values: vec!["aes128".to_string(), "aes256".to_string(), "rsa2048".to_string()],
-                        underlying: Box::new(IacType::String),
-                    },
-                    required: false,
-                    computed: false,
-                    sensitive: false,
-                    immutable: false,
-                    default_value: None,
-                    enum_values: None,
-                    read_path: None,
-                    update_only: false,
-                },
+                TestAttributeBuilder::new("name", IacType::String)
+                    .required()
+                    .description("The name of the secret")
+                    .build(),
+                TestAttributeBuilder::new("value", IacType::String)
+                    .required()
+                    .sensitive()
+                    .description("The secret value")
+                    .build(),
+                TestAttributeBuilder::new("tags", IacType::List(Box::new(IacType::String)))
+                    .description("Resource tags")
+                    .build(),
+                TestAttributeBuilder::new("secret_id", IacType::String)
+                    .computed()
+                    .description("The ID of the secret")
+                    .build(),
+                TestAttributeBuilder::new("protection_type", IacType::Enum {
+                    values: vec!["aes128".into(), "aes256".into(), "rsa2048".into()],
+                    underlying: Box::new(IacType::String),
+                })
+                    .description("The type of protection")
+                    .build(),
             ],
             identity: IdentityInfo {
                 id_field: "secret_id".to_string(),
@@ -591,20 +540,13 @@ mod tests {
     /// Helper to build a resource with an immutable field.
     fn sample_resource_with_immutable() -> IacResource {
         let mut resource = sample_resource();
-        resource.attributes.push(IacAttribute {
-            api_name: "region".to_string(),
-            canonical_name: "region".to_string(),
-            description: "The region for the secret".to_string(),
-            iac_type: IacType::String,
-            required: true,
-            computed: false,
-            sensitive: false,
-            immutable: true,
-            default_value: None,
-            enum_values: None,
-            read_path: None,
-            update_only: false,
-        });
+        resource.attributes.push(
+            TestAttributeBuilder::new("region", IacType::String)
+                .required()
+                .immutable()
+                .description("The region for the secret")
+                .build(),
+        );
         resource
     }
 
