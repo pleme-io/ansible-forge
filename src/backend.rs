@@ -11,7 +11,7 @@ use crate::module_gen;
 
 /// Ansible backend for `iac-forge`.
 ///
-/// Generates Python Ansible module files from IaC IR types.
+/// Generates Python Ansible module files from `IaC` IR types.
 #[derive(Debug, Default)]
 pub struct AnsibleBackend {
     naming: AnsibleNaming,
@@ -37,7 +37,6 @@ impl NamingConvention for AnsibleNaming {
     fn file_name(&self, resource_name: &str, kind: &ArtifactKind) -> String {
         let base = to_snake_case(resource_name);
         match kind {
-            ArtifactKind::Resource | ArtifactKind::Module => format!("{base}.py"),
             ArtifactKind::DataSource => format!("{base}_info.py"),
             ArtifactKind::Test => format!("test_{base}.yml"),
             _ => format!("{base}.py"),
@@ -50,6 +49,7 @@ impl NamingConvention for AnsibleNaming {
 }
 
 impl Backend for AnsibleBackend {
+    #[allow(clippy::unnecessary_literal_bound)]
     fn platform(&self) -> &str {
         "ansible"
     }
