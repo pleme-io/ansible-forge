@@ -6,30 +6,57 @@
 
 use iac_forge::{IacAttribute, IacDataSource, IacResource, IacType, strip_provider_prefix};
 
+/// Extension trait mapping [`IacType`] to Ansible `argument_spec` type strings.
+///
+/// Provides method-syntax access to type mapping instead of free functions,
+/// keeping the conversions co-located and discoverable.
+pub trait AnsibleTypeExt {
+    /// Ansible `argument_spec` type string for this IR type.
+    ///
+    /// For `Enum` types the underlying type is inspected, so an enum over
+    /// integers maps to `"int"`, not `"str"`.
+    fn ansible_type(&self) -> &'static str;
+
+    /// Element type string for list/set types (e.g. `"str"` for `List(String)`).
+    ///
+    /// Returns `None` for non-collection types.
+    fn ansible_elements(&self) -> Option<&'static str>;
+}
+
+impl AnsibleTypeExt for IacType {
+    fn ansible_type(&self) -> &'static str {
+        match self {
+            Self::String | Self::Any => "str",
+            Self::Integer => "int",
+            Self::Float => "float",
+            Self::Boolean => "bool",
+            Self::List(_) | Self::Set(_) => "list",
+            Self::Map(_) | Self::Object { .. } => "dict",
+            Self::Enum { underlying, .. } => underlying.ansible_type(),
+        }
+    }
+
+    fn ansible_elements(&self) -> Option<&'static str> {
+        match self {
+            Self::List(inner) | Self::Set(inner) => Some(inner.ansible_type()),
+            _ => None,
+        }
+    }
+}
+
 /// Map an `IacType` to the Ansible `argument_spec` type string.
 ///
 /// For `Enum` types, the underlying type is checked: if the underlying type
 /// is `Integer`, the Ansible type will be `'int'`, not `'str'`.
 #[must_use]
 pub fn iac_type_to_ansible(ty: &IacType) -> &'static str {
-    match ty {
-        IacType::String | IacType::Any => "str",
-        IacType::Integer => "int",
-        IacType::Float => "float",
-        IacType::Boolean => "bool",
-        IacType::List(_) | IacType::Set(_) => "list",
-        IacType::Map(_) | IacType::Object { .. } => "dict",
-        IacType::Enum { underlying, .. } => iac_type_to_ansible(underlying),
-    }
+    ty.ansible_type()
 }
 
 /// Get the `elements` type for list/set types, if applicable.
 #[must_use]
 pub fn list_elements_type(ty: &IacType) -> Option<&'static str> {
-    match ty {
-        IacType::List(inner) | IacType::Set(inner) => Some(iac_type_to_ansible(inner)),
-        _ => None,
-    }
+    ty.ansible_elements()
 }
 
 /// Build a YAML `options:` block from attributes.
@@ -44,14 +71,14 @@ fn build_options_yaml(attrs: &[IacAttribute]) -> String {
             "      description: \"{}\"",
             attr.description.replace('"', "'")
         ));
-        lines.push(format!("      type: {}", iac_type_to_ansible(&attr.iac_type)));
+        lines.push(format!("      type: {}", attr.iac_type.ansible_type()));
         if attr.required {
             lines.push("      required: true".to_string());
         }
         if attr.sensitive {
             lines.push("      no_log: true".to_string());
         }
-        if let Some(elems) = list_elements_type(&attr.iac_type) {
+        if let Some(elems) = attr.iac_type.ansible_elements() {
             lines.push(format!("      elements: {elems}"));
         }
         if let IacType::Enum { values, .. } = &attr.iac_type {
@@ -80,7 +107,7 @@ fn build_return_yaml(attrs: &[IacAttribute]) -> String {
             "  description: \"{}\"",
             attr.description.replace('"', "'")
         ));
-        lines.push(format!("  type: {}", iac_type_to_ansible(&attr.iac_type)));
+        lines.push(format!("  type: {}", attr.iac_type.ansible_type()));
         lines.push("  returned: success".to_string());
     }
     if lines.is_empty() {
@@ -99,7 +126,7 @@ fn build_argument_spec(attrs: &[IacAttribute]) -> String {
         let mut parts = Vec::new();
         parts.push(format!(
             "'type': '{}'",
-            iac_type_to_ansible(&attr.iac_type)
+            attr.iac_type.ansible_type()
         ));
         if attr.required {
             parts.push("'required': True".to_string());
@@ -107,7 +134,7 @@ fn build_argument_spec(attrs: &[IacAttribute]) -> String {
         if attr.sensitive {
             parts.push("'no_log': True".to_string());
         }
-        if let Some(elems) = list_elements_type(&attr.iac_type) {
+        if let Some(elems) = attr.iac_type.ansible_elements() {
             parts.push(format!("'elements': '{elems}'"));
         }
         if let IacType::Enum { values, .. } = &attr.iac_type {
@@ -624,6 +651,32 @@ mod tests {
             Some("int")
         );
         assert_eq!(list_elements_type(&IacType::String), None);
+    }
+
+    #[test]
+    fn ansible_type_ext_matches_free_fn() {
+        let types = [
+            IacType::String,
+            IacType::Integer,
+            IacType::Float,
+            IacType::Boolean,
+            IacType::Any,
+            IacType::List(Box::new(IacType::String)),
+            IacType::Set(Box::new(IacType::Integer)),
+            IacType::Map(Box::new(IacType::String)),
+            IacType::Object {
+                name: "T".into(),
+                fields: vec![],
+            },
+            IacType::Enum {
+                values: vec!["a".into()],
+                underlying: Box::new(IacType::Integer),
+            },
+        ];
+        for ty in &types {
+            assert_eq!(ty.ansible_type(), iac_type_to_ansible(ty));
+            assert_eq!(ty.ansible_elements(), list_elements_type(ty));
+        }
     }
 
     #[test]
