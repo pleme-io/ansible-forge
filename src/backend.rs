@@ -283,4 +283,142 @@ mod tests {
         let naming = AnsibleNaming;
         assert_eq!(naming.field_name("bound-aws-account-id"), "bound_aws_account_id");
     }
+
+    #[test]
+    fn file_name_module_kind_matches_resource() {
+        let naming = AnsibleNaming;
+        assert_eq!(
+            naming.file_name("instance", &ArtifactKind::Module),
+            "instance.py"
+        );
+        assert_eq!(
+            naming.file_name("instance", &ArtifactKind::Module),
+            naming.file_name("instance", &ArtifactKind::Resource),
+        );
+    }
+
+    #[test]
+    fn file_name_wildcard_arms_produce_py() {
+        let naming = AnsibleNaming;
+        assert_eq!(
+            naming.file_name("instance", &ArtifactKind::Schema),
+            "instance.py"
+        );
+        assert_eq!(
+            naming.file_name("instance", &ArtifactKind::Provider),
+            "instance.py"
+        );
+        assert_eq!(
+            naming.file_name("instance", &ArtifactKind::Metadata),
+            "instance.py"
+        );
+    }
+
+    #[test]
+    fn file_name_normalizes_hyphens_to_underscores() {
+        let naming = AnsibleNaming;
+        assert_eq!(
+            naming.file_name("my-resource", &ArtifactKind::Resource),
+            "my_resource.py"
+        );
+        assert_eq!(
+            naming.file_name("my-resource", &ArtifactKind::DataSource),
+            "my_resource_info.py"
+        );
+        assert_eq!(
+            naming.file_name("my-resource", &ArtifactKind::Test),
+            "test_my_resource.yml"
+        );
+    }
+
+    #[test]
+    fn naming_returns_usable_convention() {
+        let backend = AnsibleBackend::new();
+        let naming = backend.naming();
+        assert_eq!(
+            naming.resource_type_name("mycloud_instance", "mycloud"),
+            "instance"
+        );
+        assert_eq!(naming.field_name("some-field"), "some_field");
+        assert_eq!(
+            naming.file_name("instance", &ArtifactKind::Resource),
+            "instance.py"
+        );
+    }
+
+    #[test]
+    fn data_source_type_name_default_delegates() {
+        let naming = AnsibleNaming;
+        assert_eq!(
+            naming.data_source_type_name("mycloud_secret", "mycloud"),
+            naming.resource_type_name("mycloud_secret", "mycloud"),
+        );
+    }
+
+    #[test]
+    fn validate_resource_default_is_empty() {
+        let backend = AnsibleBackend::new();
+        let provider = sample_provider();
+        let resource = sample_resource();
+        let errors = backend.validate_resource(&resource, &provider);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn generate_resource_strips_provider_prefix_from_path() {
+        let backend = AnsibleBackend::new();
+        let provider = sample_provider();
+        let resource = sample_resource();
+        let artifacts = backend.generate_resource(&resource, &provider).unwrap();
+        assert_eq!(artifacts[0].path, "plugins/modules/instance.py");
+        assert!(artifacts[0].content.contains("module: instance"));
+    }
+
+    #[test]
+    fn generate_test_path_uses_snake_case() {
+        let backend = AnsibleBackend::new();
+        let provider = sample_provider();
+        let mut resource = sample_resource();
+        resource.name = "mycloud_complex-name".to_string();
+        let artifacts = backend.generate_test(&resource, &provider).unwrap();
+        assert_eq!(
+            artifacts[0].path,
+            "tests/integration/targets/complex_name/tasks/main.yml"
+        );
+    }
+
+    #[test]
+    fn generate_data_source_strips_prefix_and_appends_info() {
+        let backend = AnsibleBackend::new();
+        let provider = sample_provider();
+        let ds = IacDataSource {
+            name: "mycloud_volume".to_string(),
+            description: "Get volume info".to_string(),
+            read_endpoint: "/volumes".to_string(),
+            read_schema: "ReadVolume".to_string(),
+            read_response_schema: None,
+            attributes: vec![],
+        };
+        let artifacts = backend.generate_data_source(&ds, &provider).unwrap();
+        assert_eq!(artifacts[0].path, "plugins/modules/volume_info.py");
+        assert_eq!(artifacts[0].kind, ArtifactKind::DataSource);
+        assert!(artifacts[0].content.contains("module: volume_info"));
+    }
+
+    #[test]
+    fn generate_resource_no_matching_prefix_keeps_full_name() {
+        let backend = AnsibleBackend::new();
+        let provider = sample_provider();
+        let mut resource = sample_resource();
+        resource.name = "other_instance".to_string();
+        let artifacts = backend.generate_resource(&resource, &provider).unwrap();
+        assert_eq!(artifacts[0].path, "plugins/modules/other_instance.py");
+    }
+
+    #[test]
+    fn backend_default_matches_new() {
+        let from_default = AnsibleBackend::default();
+        let from_new = AnsibleBackend::new();
+        assert_eq!(from_default.platform(), from_new.platform());
+    }
 }
