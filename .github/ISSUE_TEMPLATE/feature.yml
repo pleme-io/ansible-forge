@@ -1,0 +1,26 @@
+name: Feature request
+description: A new emitter variant, helper change, or extension to the generator surface.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: usecase
+    attributes:
+      label: Use case
+      description: What spec shape or output pattern do you need that's not already supported?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Concrete description of the new emitter / helper / extension.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false

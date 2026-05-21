@@ -1,0 +1,45 @@
+name: Bug report
+description: The generator emits wrong output, panics, or fails to compile.
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: ansible-forge version
+      description: Cargo version or git commit
+      placeholder: "0.2.0 or 98379a1"
+    validations:
+      required: true
+
+  - type: input
+    id: iac_forge_version
+    attributes:
+      label: iac-forge version
+      description: Cargo.lock pin
+      placeholder: "4d774664"
+    validations:
+      required: true
+
+  - type: textarea
+    id: input
+    attributes:
+      label: Input
+      description: The minimal `IacResource` / `IacAction` / `IacDataSource` (or TOML spec) that triggers the issue.
+      render: rust
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual output / error
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected output
+    validations:
+      required: true
