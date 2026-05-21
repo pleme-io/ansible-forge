@@ -28,6 +28,12 @@ fn galaxy_namespace(provider: &IacProvider) -> &str {
 /// Build the `galaxy.yml` collection manifest for a `<namespace>/<name>`
 /// publishing target.
 fn galaxy_yml(namespace: &str, name: &str) -> String {
+    // Galaxy rejects collections whose manifest is missing repository/
+    // documentation/homepage/issues — the import task fails with
+    // "Invalid collection metadata. 'repository' is required". Pointing
+    // these at the GitHub repo for ansible-<name> is a safe default;
+    // generated collections override on a per-fork basis by editing
+    // galaxy.yml post-generation (or this default in the generator).
     format!(
         "namespace: {namespace}\n\
          name: {name}\n\
@@ -36,6 +42,10 @@ fn galaxy_yml(namespace: &str, name: &str) -> String {
          authors: [pleme-io]\n\
          description: \"Auto-generated Ansible modules for Akeyless Vault — managed by iac-forge.\"\n\
          license: [MIT]\n\
+         repository: https://github.com/pleme-io/ansible-{name}\n\
+         documentation: https://github.com/pleme-io/ansible-{name}\n\
+         homepage: https://github.com/pleme-io/ansible-{name}\n\
+         issues: https://github.com/pleme-io/ansible-{name}/issues\n\
          dependencies: {{}}\n\
          tags: [security, secrets, akeyless]\n"
     )
