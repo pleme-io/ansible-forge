@@ -9,16 +9,37 @@ use iac_forge::{
 
 use crate::module_gen;
 
-/// Static `galaxy.yml` collection manifest.
-const GALAXY_YML: &str = "namespace: akeyless\n\
-name: akeyless\n\
-version: 0.1.0\n\
-readme: README.md\n\
-authors: [pleme-io]\n\
-description: \"Auto-generated Ansible modules for Akeyless Vault — managed by iac-forge.\"\n\
-license: [MIT]\n\
-dependencies: {}\n\
-tags: [security, secrets, akeyless]\n";
+/// Resolve the Galaxy namespace from provider config, falling back to the
+/// provider name when no override is set.
+///
+/// Reads `[platforms.ansible] galaxy_namespace = "..."` from the provider's
+/// `platform_config`. This lets `provider.toml` ship Ansible-specific
+/// publication metadata without polluting the IR.
+fn galaxy_namespace(provider: &IacProvider) -> &str {
+    provider
+        .platform_config
+        .get("ansible")
+        .and_then(toml::Value::as_table)
+        .and_then(|t| t.get("galaxy_namespace"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(&provider.name)
+}
+
+/// Build the `galaxy.yml` collection manifest for a `<namespace>/<name>`
+/// publishing target.
+fn galaxy_yml(namespace: &str, name: &str) -> String {
+    format!(
+        "namespace: {namespace}\n\
+         name: {name}\n\
+         version: 0.1.0\n\
+         readme: README.md\n\
+         authors: [pleme-io]\n\
+         description: \"Auto-generated Ansible modules for Akeyless Vault — managed by iac-forge.\"\n\
+         license: [MIT]\n\
+         dependencies: {{}}\n\
+         tags: [security, secrets, akeyless]\n"
+    )
+}
 
 /// Static `meta/runtime.yml` requiring a recent Ansible.
 const RUNTIME_YML: &str = "requires_ansible: '>=2.14.0'\n";
@@ -26,13 +47,17 @@ const RUNTIME_YML: &str = "requires_ansible: '>=2.14.0'\n";
 /// Static `requirements.txt` listing the Akeyless Python SDK.
 const REQUIREMENTS_TXT: &str = "akeyless>=5.0.22\n";
 
-/// Static `README.md` stub.
-const README_MD: &str = "# ansible-akeyless\n\n\
-Auto-generated Ansible collection wrapping the Akeyless Python SDK.\n\
-Each module proxies one Akeyless V2 API endpoint with create/read/update/delete\n\
-semantics derived from the upstream OpenAPI specification.\n\
-Do not edit generated modules — they will be overwritten.\n\n\
-Regenerate with: `iac-forge-cli generate --backend ansible`.\n";
+/// Build the `README.md` stub for a `<namespace>/<name>` collection.
+fn readme_md(namespace: &str, name: &str) -> String {
+    format!(
+        "# {namespace}.{name}\n\n\
+         Auto-generated Ansible collection wrapping the Akeyless Python SDK.\n\
+         Each module proxies one Akeyless V2 API endpoint with create/read/update/delete\n\
+         semantics derived from the upstream OpenAPI specification.\n\
+         Do not edit generated modules — they will be overwritten.\n\n\
+         Regenerate with: `iac-forge-cli generate --backend ansible`.\n"
+    )
+}
 
 /// Ansible backend for `iac-forge`.
 ///
@@ -94,7 +119,8 @@ impl Backend for AnsibleBackend {
         provider: &IacProvider,
     ) -> Result<Vec<GeneratedArtifact>, IacForgeError> {
         let module_name = strip_provider_prefix(&resource.name, &provider.name);
-        let content = module_gen::generate_resource_module(resource, &provider.name);
+        let namespace = galaxy_namespace(provider);
+        let content = module_gen::generate_resource_module(resource, &provider.name, namespace);
         let path = format!("plugins/modules/{}.py", to_snake_case(module_name));
 
         Ok(vec![GeneratedArtifact::new(
@@ -110,7 +136,8 @@ impl Backend for AnsibleBackend {
         provider: &IacProvider,
     ) -> Result<Vec<GeneratedArtifact>, IacForgeError> {
         let module_name = strip_provider_prefix(&ds.name, &provider.name);
-        let content = module_gen::generate_data_source_module(ds, &provider.name);
+        let namespace = galaxy_namespace(provider);
+        let content = module_gen::generate_data_source_module(ds, &provider.name, namespace);
         let path = format!("plugins/modules/{}_info.py", to_snake_case(module_name));
 
         Ok(vec![GeneratedArtifact::new(
@@ -122,23 +149,33 @@ impl Backend for AnsibleBackend {
 
     fn generate_provider(
         &self,
-        _provider: &IacProvider,
+        provider: &IacProvider,
         _resources: &[IacResource],
         _data_sources: &[IacDataSource],
     ) -> Result<Vec<GeneratedArtifact>, IacForgeError> {
         // Collection-level files: bundled Python helper, galaxy metadata,
         // runtime manifest, requirements, and a stub README. These are
         // provider-scoped (one per generation), so this is the idiomatic hook.
+        let namespace = galaxy_namespace(provider);
+        let collection_name = provider.name.as_str();
         Ok(vec![
             GeneratedArtifact::new(
                 "plugins/module_utils/akeyless_client.py",
                 crate::client_helper::AKEYLESS_CLIENT_PY,
                 ArtifactKind::Metadata,
             ),
-            GeneratedArtifact::new("galaxy.yml", GALAXY_YML, ArtifactKind::Metadata),
+            GeneratedArtifact::new(
+                "galaxy.yml",
+                galaxy_yml(namespace, collection_name),
+                ArtifactKind::Metadata,
+            ),
             GeneratedArtifact::new("meta/runtime.yml", RUNTIME_YML, ArtifactKind::Metadata),
             GeneratedArtifact::new("requirements.txt", REQUIREMENTS_TXT, ArtifactKind::Metadata),
-            GeneratedArtifact::new("README.md", README_MD, ArtifactKind::Metadata),
+            GeneratedArtifact::new(
+                "README.md",
+                readme_md(namespace, collection_name),
+                ArtifactKind::Metadata,
+            ),
         ])
     }
 
@@ -167,7 +204,8 @@ impl Backend for AnsibleBackend {
         provider: &IacProvider,
     ) -> Result<Vec<GeneratedArtifact>, IacForgeError> {
         let module_name = strip_provider_prefix(&action.name, &provider.name);
-        let content = module_gen::generate_action_module(action, &provider.name);
+        let namespace = galaxy_namespace(provider);
+        let content = module_gen::generate_action_module(action, &provider.name, namespace);
         let path = format!("plugins/modules/{}.py", to_snake_case(module_name));
 
         Ok(vec![GeneratedArtifact::new(
@@ -604,5 +642,134 @@ mod tests {
         assert!(content.contains("def run_action"));
         assert!(content.contains("call_api(module, client, \"uid_generate_token\", body)"));
         assert!(content.contains("supports_check_mode=False"));
+    }
+
+    // ── Galaxy namespace resolution ────────────────────────────────────
+
+    fn provider_with_namespace(ns: &str) -> IacProvider {
+        let mut p = sample_provider();
+        let mut ansible_table = toml::value::Table::new();
+        ansible_table.insert(
+            "galaxy_namespace".to_string(),
+            toml::Value::String(ns.to_string()),
+        );
+        p.platform_config
+            .insert("ansible".to_string(), toml::Value::Table(ansible_table));
+        p
+    }
+
+    #[test]
+    fn galaxy_namespace_falls_back_to_provider_name() {
+        let provider = sample_provider();
+        assert_eq!(galaxy_namespace(&provider), "mycloud");
+    }
+
+    #[test]
+    fn galaxy_namespace_honors_platform_config_override() {
+        let provider = provider_with_namespace("drzln0");
+        assert_eq!(galaxy_namespace(&provider), "drzln0");
+    }
+
+    #[test]
+    fn galaxy_namespace_ignores_non_table_value() {
+        let mut provider = sample_provider();
+        provider.platform_config.insert(
+            "ansible".to_string(),
+            toml::Value::String("not-a-table".to_string()),
+        );
+        // Non-table values cannot carry a namespace key — fall back to provider name.
+        assert_eq!(galaxy_namespace(&provider), "mycloud");
+    }
+
+    #[test]
+    fn galaxy_yml_uses_resolved_namespace() {
+        let backend = AnsibleBackend::new();
+        let provider = provider_with_namespace("drzln0");
+        let artifacts = backend.generate_provider(&provider, &[], &[]).unwrap();
+        let galaxy = artifacts
+            .iter()
+            .find(|a| a.path == "galaxy.yml")
+            .expect("galaxy.yml must be generated");
+        assert!(
+            galaxy.content.starts_with("namespace: drzln0\n"),
+            "galaxy.yml must declare the overridden namespace: {}",
+            galaxy.content
+        );
+        assert!(galaxy.content.contains("name: mycloud\n"));
+    }
+
+    #[test]
+    fn galaxy_yml_defaults_to_provider_name_when_unset() {
+        let backend = AnsibleBackend::new();
+        let provider = sample_provider();
+        let artifacts = backend.generate_provider(&provider, &[], &[]).unwrap();
+        let galaxy = artifacts
+            .iter()
+            .find(|a| a.path == "galaxy.yml")
+            .expect("galaxy.yml must be generated");
+        assert!(galaxy.content.starts_with("namespace: mycloud\n"));
+    }
+
+    #[test]
+    fn readme_uses_resolved_namespace() {
+        let backend = AnsibleBackend::new();
+        let provider = provider_with_namespace("drzln0");
+        let artifacts = backend.generate_provider(&provider, &[], &[]).unwrap();
+        let readme = artifacts
+            .iter()
+            .find(|a| a.path == "README.md")
+            .expect("README.md must be generated");
+        assert!(
+            readme.content.starts_with("# drzln0.mycloud\n"),
+            "README.md must reference the namespaced collection: {}",
+            readme.content
+        );
+    }
+
+    #[test]
+    fn generate_resource_uses_resolved_namespace_in_import_path() {
+        let backend = AnsibleBackend::new();
+        let provider = provider_with_namespace("drzln0");
+        let resource = sample_resource();
+        let artifacts = backend.generate_resource(&resource, &provider).unwrap();
+        assert!(artifacts[0].content.contains(
+            "from ansible_collections.drzln0.mycloud.plugins.module_utils.akeyless_client import"
+        ));
+        assert!(
+            !artifacts[0]
+                .content
+                .contains("ansible_collections.akeyless.akeyless"),
+            "old hardcoded namespace must not leak"
+        );
+    }
+
+    #[test]
+    fn generate_data_source_uses_resolved_namespace_in_import_path() {
+        let backend = AnsibleBackend::new();
+        let provider = provider_with_namespace("drzln0");
+        let ds = IacDataSource {
+            name: "mycloud_volume".to_string(),
+            description: "Get volume info".to_string(),
+            read_endpoint: "/volumes".to_string(),
+            read_schema: "ReadVolume".to_string(),
+            read_response_schema: None,
+            attributes: vec![],
+            read_mapping: std::collections::BTreeMap::new(),
+        };
+        let artifacts = backend.generate_data_source(&ds, &provider).unwrap();
+        assert!(artifacts[0].content.contains(
+            "from ansible_collections.drzln0.mycloud.plugins.module_utils.akeyless_client import"
+        ));
+    }
+
+    #[test]
+    fn generate_action_uses_resolved_namespace_in_import_path() {
+        let backend = AnsibleBackend::new();
+        let provider = provider_with_namespace("drzln0");
+        let action = sample_action();
+        let artifacts = backend.generate_action(&action, &provider).unwrap();
+        assert!(artifacts[0].content.contains(
+            "from ansible_collections.drzln0.mycloud.plugins.module_utils.akeyless_client import"
+        ));
     }
 }

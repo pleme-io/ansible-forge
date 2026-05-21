@@ -303,6 +303,8 @@ fn format_resource_python(
     options_yaml: &str,
     return_yaml: &str,
     argument_spec: &str,
+    namespace: &str,
+    provider_name: &str,
 ) -> String {
     let state_spec = state_spec_entry();
     let header = PYTHON_HEADER;
@@ -314,6 +316,8 @@ fn format_resource_python(
     let delete_method = python_sdk_method_name(&resource.crud.delete_schema);
     let id_field = &resource.identity.id_field;
     let update_function = render_update_function(resource, module_name);
+    let import_path =
+        format!("ansible_collections.{namespace}.{provider_name}.plugins.module_utils.akeyless_client");
     format!(
         r#"{header}
 
@@ -347,7 +351,7 @@ RETURN = r'''
 '''
 
 from ansible.module_utils.basic import AnsibleModule
-from ansible_collections.akeyless.akeyless.plugins.module_utils.akeyless_client import (
+from {import_path} import (
     get_client, call_api, build_body,
 )
 
@@ -435,8 +439,15 @@ impl ModuleFragments {
 }
 
 /// Generate a complete Python module for a resource.
+///
+/// `namespace` is the Ansible Galaxy namespace used in the generated
+/// `ansible_collections.<namespace>.<provider_name>...` import path.
 #[must_use]
-pub fn generate_resource_module(resource: &IacResource, provider_name: &str) -> String {
+pub fn generate_resource_module(
+    resource: &IacResource,
+    provider_name: &str,
+    namespace: &str,
+) -> String {
     let module_name = strip_provider_prefix(&resource.name, provider_name);
     let description = resource.description.replace('"', "'");
     let frags = ModuleFragments::from_attributes(&resource.attributes);
@@ -448,6 +459,8 @@ pub fn generate_resource_module(resource: &IacResource, provider_name: &str) -> 
         &frags.options_yaml,
         &frags.return_yaml,
         &frags.argument_spec,
+        namespace,
+        provider_name,
     )
 }
 
@@ -475,8 +488,15 @@ fn python_set_literal(items: &[String]) -> String {
 ///
 /// Check-mode is disabled (`supports_check_mode=False`) because action
 /// endpoints have side effects that can't be simulated.
+///
+/// `namespace` is the Ansible Galaxy namespace used in the generated
+/// `ansible_collections.<namespace>.<provider_name>...` import path.
 #[must_use]
-pub fn generate_action_module(action: &IacAction, provider_name: &str) -> String {
+pub fn generate_action_module(
+    action: &IacAction,
+    provider_name: &str,
+    namespace: &str,
+) -> String {
     let module_name = strip_provider_prefix(&action.name, provider_name);
     let description = action.description.replace('"', "'");
     let frags = ModuleFragments::from_attributes(&action.attributes);
@@ -492,6 +512,8 @@ pub fn generate_action_module(action: &IacAction, provider_name: &str) -> String
         .unwrap_or_else(|| python_sdk_method_name(&action.schema));
     let sensitive_set = python_set_literal(&action.sensitive_response_fields);
     let changed_literal = if action.mutating { "True" } else { "False" };
+    let import_path =
+        format!("ansible_collections.{namespace}.{provider_name}.plugins.module_utils.akeyless_client");
     format!(
         r#"{header}
 
@@ -519,7 +541,7 @@ result:
 '''
 
 from ansible.module_utils.basic import AnsibleModule
-from ansible_collections.akeyless.akeyless.plugins.module_utils.akeyless_client import (
+from {import_path} import (
     get_client, call_api, build_body,
 )
 
@@ -556,8 +578,15 @@ if __name__ == '__main__':
 }
 
 /// Generate a complete Python module for a data source (read-only).
+///
+/// `namespace` is the Ansible Galaxy namespace used in the generated
+/// `ansible_collections.<namespace>.<provider_name>...` import path.
 #[must_use]
-pub fn generate_data_source_module(ds: &IacDataSource, provider_name: &str) -> String {
+pub fn generate_data_source_module(
+    ds: &IacDataSource,
+    provider_name: &str,
+    namespace: &str,
+) -> String {
     let module_name = format!(
         "{}_info",
         strip_provider_prefix(&ds.name, provider_name)
@@ -571,6 +600,8 @@ pub fn generate_data_source_module(ds: &IacDataSource, provider_name: &str) -> S
     let argument_spec = &frags.argument_spec;
     let read_class = python_sdk_model_class_name(&ds.read_schema);
     let read_method = python_sdk_method_name(&ds.read_schema);
+    let import_path =
+        format!("ansible_collections.{namespace}.{provider_name}.plugins.module_utils.akeyless_client");
     format!(
         r#"{header}
 
@@ -595,7 +626,7 @@ RETURN = r'''
 '''
 
 from ansible.module_utils.basic import AnsibleModule
-from ansible_collections.akeyless.akeyless.plugins.module_utils.akeyless_client import (
+from {import_path} import (
     get_client, call_api, build_body,
 )
 
@@ -932,7 +963,7 @@ mod tests {
     #[test]
     fn resource_module_contains_documentation() {
         let resource = sample_resource();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(output.contains("DOCUMENTATION = r'''"));
         assert!(output.contains("module: static_secret"));
         assert!(output.contains("short_description: Manage a static secret"));
@@ -941,7 +972,7 @@ mod tests {
     #[test]
     fn resource_module_uses_dict_literal_not_dict_call() {
         let resource = sample_resource();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         // Must use dict literal `{...}`, not `dict(...)`.
         assert!(
             output.contains("argument_spec = {"),
@@ -977,7 +1008,7 @@ mod tests {
             }],
             read_mapping: std::collections::BTreeMap::new(),
         };
-        let output = generate_data_source_module(&ds, "test");
+        let output = generate_data_source_module(&ds, "test", "akeyless");
         assert!(
             output.contains("argument_spec = {"),
             "data source argument_spec must use dict literal syntax"
@@ -991,7 +1022,7 @@ mod tests {
     #[test]
     fn resource_module_argument_spec_types() {
         let resource = sample_resource();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(output.contains("'name': {'type': 'str', 'required': True}"));
         assert!(output.contains("'tags': {'type': 'list', 'elements': 'str'}"));
     }
@@ -999,7 +1030,7 @@ mod tests {
     #[test]
     fn resource_module_required_fields() {
         let resource = sample_resource();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(output.contains("'name': {'type': 'str', 'required': True}"));
         assert!(output.contains("'value': {'type': 'str', 'required': True, 'no_log': True}"));
     }
@@ -1007,7 +1038,7 @@ mod tests {
     #[test]
     fn resource_module_sensitive_no_log() {
         let resource = sample_resource();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(output.contains("'no_log': True"));
         let doc_section = &output[output.find("DOCUMENTATION").unwrap()..output.find("EXAMPLES").unwrap()];
         assert!(doc_section.contains("no_log: true"));
@@ -1016,7 +1047,7 @@ mod tests {
     #[test]
     fn resource_module_enum_choices() {
         let resource = sample_resource();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(output.contains("'choices': ['aes128', 'aes256', 'rsa2048']"));
         let doc_section = &output[output.find("DOCUMENTATION").unwrap()..output.find("EXAMPLES").unwrap()];
         assert!(doc_section.contains("choices: [\"aes128\", \"aes256\", \"rsa2048\"]"));
@@ -1025,7 +1056,7 @@ mod tests {
     #[test]
     fn module_name_snake_case() {
         let resource = sample_resource();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(output.contains("module: static_secret"));
         assert!(!output.contains("module: test_static_secret"));
     }
@@ -1054,7 +1085,7 @@ mod tests {
             }],
             read_mapping: std::collections::BTreeMap::new(),
         };
-        let output = generate_data_source_module(&ds, "test");
+        let output = generate_data_source_module(&ds, "test", "akeyless");
         assert!(output.contains("module: secret_info_info"));
         assert!(!output.contains("state"));
         assert!(!output.contains("create_resource"));
@@ -1074,7 +1105,7 @@ mod tests {
     #[test]
     fn computed_fields_excluded_from_argument_spec() {
         let resource = sample_resource();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(!output.contains("'secret_id':"));
         let return_section = &output[output.find("RETURN").unwrap()..];
         assert!(return_section.contains("secret_id"));
@@ -1085,7 +1116,7 @@ mod tests {
         // Each CRUD function should route through the shared call_api helper,
         // which centralises ApiException -> module.fail_json mapping.
         let resource = sample_resource();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         // create / delete / read always go through call_api.
         let call_api_count = output.matches("call_api(module, client,").count();
         assert!(
@@ -1110,7 +1141,7 @@ mod tests {
             attributes: vec![],
             read_mapping: std::collections::BTreeMap::new(),
         };
-        let output = generate_data_source_module(&ds, "test");
+        let output = generate_data_source_module(&ds, "test", "akeyless");
         assert!(
             output.contains("call_api(module, client,"),
             "data source read should route through call_api"
@@ -1120,7 +1151,7 @@ mod tests {
     #[test]
     fn immutable_fields_generate_update_comment() {
         let resource = sample_resource_with_immutable();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(
             output.contains("immutable after creation"),
             "update_resource should warn about immutable fields"
@@ -1134,7 +1165,7 @@ mod tests {
     #[test]
     fn no_immutable_fields_no_comment() {
         let resource = sample_resource();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(
             !output.contains("immutable after creation"),
             "should not have immutable comment when no fields are immutable"
@@ -1146,7 +1177,7 @@ mod tests {
         // Regression test: generated Python must never use dict('key': ...)
         // syntax, which is invalid. It must use dict literal {}.
         let resource = sample_resource();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
 
         // Check that argument_spec uses { ... } literal
         let spec_start = output.find("argument_spec = {").expect("must have argument_spec = {");
@@ -1176,7 +1207,7 @@ mod tests {
             attributes: vec![],
             read_mapping: std::collections::BTreeMap::new(),
         };
-        let output = generate_data_source_module(&ds, "test");
+        let output = generate_data_source_module(&ds, "test", "akeyless");
         // main() must default a missing read result to an empty dict before
         // calling module.exit_json, never crash on None.
         assert!(
@@ -1300,7 +1331,7 @@ mod tests {
     #[test]
     fn resource_with_all_iac_type_variants_in_argument_spec() {
         let resource = resource_with_all_types();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
 
         assert!(output.contains("'str_field': {'type': 'str'}"), "str missing");
         assert!(output.contains("'int_field': {'type': 'int'}"), "int missing");
@@ -1317,7 +1348,7 @@ mod tests {
     #[test]
     fn resource_with_all_iac_type_variants_in_documentation() {
         let resource = resource_with_all_types();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         let doc_section = &output[output.find("DOCUMENTATION").unwrap()..output.find("EXAMPLES").unwrap()];
 
         assert!(doc_section.contains("type: str"), "str doc missing");
@@ -1354,7 +1385,7 @@ mod tests {
         read_mapping: std::collections::BTreeMap::new(),
         };
 
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
 
         // Should still have valid Python with state parameter
         assert!(output.contains("AnsibleModule"));
@@ -1394,7 +1425,7 @@ mod tests {
             read_mapping: std::collections::BTreeMap::new(),
         };
 
-        let output = generate_data_source_module(&ds, "test");
+        let output = generate_data_source_module(&ds, "test", "akeyless");
 
         // Should contain the info suffix module name
         assert!(output.contains("module: role_info"));
@@ -1505,7 +1536,7 @@ mod tests {
         read_mapping: std::collections::BTreeMap::new(),
         };
 
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         // Module name should be snake_case with provider prefix stripped
         assert!(output.contains("module: my_complex_resource"));
     }
@@ -1653,7 +1684,7 @@ mod tests {
             default_value: None, enum_values: None, read_path: None, update_only: false,
         });
 
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(output.contains("- region"));
         assert!(output.contains("- zone"));
         assert!(output.contains("immutable after creation"));
@@ -1855,7 +1886,7 @@ mod tests {
         read_mapping: std::collections::BTreeMap::new(),
         };
 
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
 
         let doc_section = &output[output.find("DOCUMENTATION").unwrap()..output.find("EXAMPLES").unwrap()];
         assert!(
@@ -1906,7 +1937,7 @@ mod tests {
         read_mapping: std::collections::BTreeMap::new(),
         };
 
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         let choices_count = output.matches("'choices': ['low', 'high']").count();
         assert_eq!(
             choices_count, 1,
@@ -1957,7 +1988,7 @@ mod tests {
         read_mapping: std::collections::BTreeMap::new(),
         };
 
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(
             output.contains("'name': {'type': 'str', 'required': True}"),
             "computed+required field should be in argument_spec"
@@ -2005,7 +2036,7 @@ mod tests {
         read_mapping: std::collections::BTreeMap::new(),
         };
 
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(
             output.contains("A 'quoted' description"),
             "resource description double quotes should be replaced with single quotes"
@@ -2067,7 +2098,7 @@ mod tests {
         read_mapping: std::collections::BTreeMap::new(),
         };
 
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(output.contains("'int_list': {'type': 'list', 'elements': 'int'}"));
         assert!(output.contains("'bool_set': {'type': 'list', 'elements': 'bool'}"));
         assert!(output.contains("'dict_list': {'type': 'list', 'elements': 'dict'}"));
@@ -2102,7 +2133,7 @@ mod tests {
             read_mapping: std::collections::BTreeMap::new(),
         };
 
-        let output = generate_data_source_module(&ds, "test");
+        let output = generate_data_source_module(&ds, "test", "akeyless");
         assert!(
             output.contains("'password': {'type': 'str', 'required': True, 'no_log': True}"),
             "data source sensitive field should have no_log"
@@ -2151,7 +2182,7 @@ mod tests {
             read_mapping: std::collections::BTreeMap::new(),
         };
 
-        let output = generate_data_source_module(&ds, "test");
+        let output = generate_data_source_module(&ds, "test", "akeyless");
         assert!(!output.contains("'size':"), "computed field should not be in data source argument_spec");
         assert!(!output.contains("'enabled':"), "computed field should not be in data source argument_spec");
 
@@ -2248,7 +2279,7 @@ mod tests {
         read_mapping: std::collections::BTreeMap::new(),
         };
 
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(output.contains("'state':"), "state param should still exist");
         assert!(!output.contains("'auto_id':"), "computed-only should not be in argument_spec");
         assert!(!output.contains("'created_at':"), "computed-only should not be in argument_spec");
@@ -2261,7 +2292,7 @@ mod tests {
     #[test]
     fn resource_module_check_mode_support() {
         let resource = sample_resource();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(
             output.contains("supports_check_mode=True"),
             "generated module should support check_mode"
@@ -2275,7 +2306,7 @@ mod tests {
     #[test]
     fn resource_module_state_choices() {
         let resource = sample_resource();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(
             output.contains("'state': {'type': 'str', 'choices': ['present', 'absent'], 'default': 'present'}"),
             "state param should have correct choices and default"
@@ -2304,7 +2335,7 @@ mod tests {
             read_mapping: std::collections::BTreeMap::new(),
         };
 
-        let output = generate_data_source_module(&ds, "test");
+        let output = generate_data_source_module(&ds, "test", "akeyless");
         assert!(
             output.contains("'choices': ['web', 'api', 'worker']"),
             "data source enum should have choices in argument_spec"
@@ -2328,7 +2359,7 @@ mod tests {
             read_mapping: std::collections::BTreeMap::new(),
         };
 
-        let output = generate_data_source_module(&ds, "test");
+        let output = generate_data_source_module(&ds, "test", "akeyless");
         assert!(output.contains("module: bare_info"));
         assert!(output.contains("argument_spec = {"));
         let return_section = &output[output.find("RETURN").unwrap()..];
@@ -2347,7 +2378,7 @@ mod tests {
             read_mapping: std::collections::BTreeMap::new(),
         };
 
-        let output = generate_data_source_module(&ds, "test");
+        let output = generate_data_source_module(&ds, "test", "akeyless");
         assert!(
             output.contains("A 'special' data source"),
             "data source description should escape double quotes to single quotes"
@@ -2357,7 +2388,7 @@ mod tests {
     #[test]
     fn resource_module_contains_python_shebang_and_copyright() {
         let resource = sample_resource();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(output.starts_with("#!/usr/bin/python"));
         assert!(output.contains("# -*- coding: utf-8 -*-"));
         assert!(output.contains("Copyright"));
@@ -2375,7 +2406,7 @@ mod tests {
             attributes: vec![],
             read_mapping: std::collections::BTreeMap::new(),
         };
-        let output = generate_data_source_module(&ds, "test");
+        let output = generate_data_source_module(&ds, "test", "akeyless");
         assert!(output.starts_with("#!/usr/bin/python"));
         assert!(output.contains("# -*- coding: utf-8 -*-"));
         assert!(output.contains("from __future__ import absolute_import"));
@@ -2511,7 +2542,7 @@ mod tests {
         read_mapping: std::collections::BTreeMap::new(),
         };
 
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         let return_section = &output[output.find("RETURN").unwrap()..];
         assert!(return_section.contains("count:\n  description:"));
         assert!(return_section.contains("type: int"));
@@ -2563,7 +2594,7 @@ mod tests {
         read_mapping: std::collections::BTreeMap::new(),
         };
 
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         let doc_section = &output[output.find("DOCUMENTATION").unwrap()..output.find("EXAMPLES").unwrap()];
         assert!(doc_section.contains("input:"), "required non-computed field should be in DOCUMENTATION options");
         assert!(!doc_section.contains("server_set:"), "computed optional field should NOT be in DOCUMENTATION options");
@@ -2902,14 +2933,14 @@ mod tests {
             }],
             read_mapping: std::collections::BTreeMap::new(),
         };
-        let output = generate_data_source_module(&ds, "test");
+        let output = generate_data_source_module(&ds, "test", "akeyless");
         assert!(output.contains("'ids': {'type': 'list', 'required': True, 'elements': 'int'}"));
     }
 
     #[test]
     fn resource_module_crud_functions_present() {
         let resource = sample_resource();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(output.contains("def create_resource(module, client, token):"));
         assert!(output.contains("def update_resource(module, client, token):"));
         assert!(output.contains("def delete_resource(module, client, token):"));
@@ -2920,7 +2951,7 @@ mod tests {
     #[test]
     fn resource_module_state_dispatch_logic() {
         let resource = sample_resource();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(output.contains("state = module.params.get('state', 'present')"));
         assert!(output.contains("current = read_resource(module, client, token)"));
         assert!(output.contains("if state == 'absent':"));
@@ -2940,7 +2971,7 @@ mod tests {
             attributes: vec![],
             read_mapping: std::collections::BTreeMap::new(),
         };
-        let output = generate_data_source_module(&ds, "test");
+        let output = generate_data_source_module(&ds, "test", "akeyless");
         assert!(output.contains("from ansible.module_utils.basic import AnsibleModule"));
         assert!(output.contains("module = AnsibleModule("));
         assert!(output.contains("supports_check_mode=True"));
@@ -3001,7 +3032,7 @@ mod tests {
     #[test]
     fn resource_module_examples_section() {
         let resource = sample_resource();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         let examples = &output[output.find("EXAMPLES").unwrap()..output.find("RETURN").unwrap()];
         assert!(examples.contains("Create static_secret"));
         assert!(examples.contains("Delete static_secret"));
@@ -3020,7 +3051,7 @@ mod tests {
             attributes: vec![],
             read_mapping: std::collections::BTreeMap::new(),
         };
-        let output = generate_data_source_module(&ds, "test");
+        let output = generate_data_source_module(&ds, "test", "akeyless");
         let examples = &output[output.find("EXAMPLES").unwrap()..output.find("RETURN").unwrap()];
         assert!(examples.contains("Get items_info"));
         assert!(examples.contains("register: result"));
@@ -3100,8 +3131,9 @@ mod tests {
 
     #[test]
     fn resource_module_imports_akeyless_client_helper() {
-        let resource = sample_resource();
-        let output = generate_resource_module(&resource, "test");
+        let mut resource = sample_resource();
+        resource.name = "akeyless_static_secret".to_string();
+        let output = generate_resource_module(&resource, "akeyless", "akeyless");
         assert!(
             output.contains(
                 "from ansible_collections.akeyless.akeyless.plugins.module_utils.akeyless_client import"
@@ -3114,7 +3146,7 @@ mod tests {
     #[test]
     fn data_source_module_imports_akeyless_client_helper() {
         let ds = IacDataSource {
-            name: "test_thing_info".to_string(),
+            name: "akeyless_thing_info".to_string(),
             description: "thing".to_string(),
             read_endpoint: "/read".to_string(),
             read_schema: "ReadThing".to_string(),
@@ -3122,16 +3154,69 @@ mod tests {
             attributes: vec![],
             read_mapping: std::collections::BTreeMap::new(),
         };
-        let output = generate_data_source_module(&ds, "test");
+        let output = generate_data_source_module(&ds, "akeyless", "akeyless");
         assert!(output.contains(
             "from ansible_collections.akeyless.akeyless.plugins.module_utils.akeyless_client import"
         ));
     }
 
     #[test]
+    fn resource_module_uses_custom_namespace_in_import_path() {
+        let mut resource = sample_resource();
+        resource.name = "akeyless_static_secret".to_string();
+        let output = generate_resource_module(&resource, "akeyless", "drzln0");
+        assert!(
+            output.contains(
+                "from ansible_collections.drzln0.akeyless.plugins.module_utils.akeyless_client import"
+            ),
+            "resource module must honor the namespace argument in the import path: {output}"
+        );
+        assert!(
+            !output.contains("ansible_collections.akeyless.akeyless"),
+            "custom namespace must not leak the old hardcoded namespace"
+        );
+    }
+
+    #[test]
+    fn data_source_module_uses_custom_namespace_in_import_path() {
+        let ds = IacDataSource {
+            name: "akeyless_thing_info".to_string(),
+            description: "thing".to_string(),
+            read_endpoint: "/read".to_string(),
+            read_schema: "ReadThing".to_string(),
+            read_response_schema: None,
+            attributes: vec![],
+            read_mapping: std::collections::BTreeMap::new(),
+        };
+        let output = generate_data_source_module(&ds, "akeyless", "drzln0");
+        assert!(
+            output.contains(
+                "from ansible_collections.drzln0.akeyless.plugins.module_utils.akeyless_client import"
+            ),
+            "data source module must honor the namespace argument in the import path"
+        );
+        assert!(
+            !output.contains("ansible_collections.akeyless.akeyless"),
+            "custom namespace must not leak the old hardcoded namespace"
+        );
+    }
+
+    #[test]
+    fn action_module_uses_custom_namespace_in_import_path() {
+        let action = sample_action();
+        let output = generate_action_module(&action, "akeyless", "drzln0");
+        assert!(
+            output.contains(
+                "from ansible_collections.drzln0.akeyless.plugins.module_utils.akeyless_client import"
+            ),
+            "action module must honor the namespace argument in the import path"
+        );
+    }
+
+    #[test]
     fn resource_module_uses_build_body_with_create_schema_class() {
         let resource = sample_resource();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         // sample_resource.crud.create_schema = "CreateBody"
         assert!(
             output.contains("build_body(\"CreateBody\""),
@@ -3144,7 +3229,7 @@ mod tests {
         // Resource crud schemas:    "CreateBody" / "UpdateBody" / "ReadBody" / "DeleteBody".
         // Expected python SDK methods: "create_body" / "update_body" / etc.
         let resource = sample_resource();
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(output.contains("call_api(module, client, \"create_body\""));
         assert!(output.contains("call_api(module, client, \"read_body\""));
         assert!(output.contains("call_api(module, client, \"delete_body\""));
@@ -3155,7 +3240,7 @@ mod tests {
         let mut resource = sample_resource();
         resource.crud.update_endpoint = None;
         resource.crud.update_schema = None;
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(
             output.contains("update not supported, delete+recreate"),
             "resources without update_endpoint should emit an unsupported-update fail_json"
@@ -3170,7 +3255,7 @@ mod tests {
         // read_mapping).
         let mut resource = sample_resource();
         resource.read_mapping.insert("item_name".into(), "name".into());
-        let output = generate_resource_module(&resource, "test");
+        let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(output.contains("# TODO(phase-1b): use read_mapping for honest diff"));
     }
 
@@ -3230,7 +3315,7 @@ mod tests {
     #[test]
     fn action_module_carries_no_state_parameter() {
         let action = sample_action();
-        let out = generate_action_module(&action, "test");
+        let out = generate_action_module(&action, "test", "akeyless");
         // Action modules do not have create/read/update/delete semantics.
         assert!(!out.contains("'state':"), "action modules must not declare state");
         assert!(!out.contains("def create_resource"));
@@ -3240,14 +3325,14 @@ mod tests {
     #[test]
     fn action_module_disables_check_mode() {
         let action = sample_action();
-        let out = generate_action_module(&action, "test");
+        let out = generate_action_module(&action, "test", "akeyless");
         assert!(out.contains("supports_check_mode=False"));
     }
 
     #[test]
     fn action_module_calls_expected_sdk_method() {
         let action = sample_action();
-        let out = generate_action_module(&action, "test");
+        let out = generate_action_module(&action, "test", "akeyless");
         assert!(out.contains("call_api(module, client, \"uid_generate_token\", body)"));
         assert!(out.contains("build_body(\"UidGenerateToken\""));
     }
@@ -3255,7 +3340,7 @@ mod tests {
     #[test]
     fn action_module_masks_sensitive_response_fields() {
         let action = sample_action();
-        let out = generate_action_module(&action, "test");
+        let out = generate_action_module(&action, "test", "akeyless");
         assert!(out.contains("_sensitive = {'token'}"), "expected token in sensitive set, got:\n{out}");
         assert!(out.contains("'***' if k in _sensitive else v"));
     }
@@ -3264,7 +3349,7 @@ mod tests {
     fn action_module_empty_sensitive_set_renders_set_literal() {
         let mut action = sample_action();
         action.sensitive_response_fields.clear();
-        let out = generate_action_module(&action, "test");
+        let out = generate_action_module(&action, "test", "akeyless");
         assert!(out.contains("_sensitive = set()"));
     }
 
@@ -3272,14 +3357,14 @@ mod tests {
     fn action_module_mutating_false_emits_changed_false() {
         let mut action = sample_action();
         action.mutating = false;
-        let out = generate_action_module(&action, "test");
+        let out = generate_action_module(&action, "test", "akeyless");
         assert!(out.contains("module.exit_json(changed=False, result=masked)"));
     }
 
     #[test]
     fn action_module_mutating_true_emits_changed_true() {
         let action = sample_action();
-        let out = generate_action_module(&action, "test");
+        let out = generate_action_module(&action, "test", "akeyless");
         assert!(out.contains("module.exit_json(changed=True, result=masked)"));
     }
 
@@ -3287,14 +3372,14 @@ mod tests {
     fn action_module_strips_provider_prefix_from_name() {
         let mut action = sample_action();
         action.name = "akeyless_uid_generate_token".to_string();
-        let out = generate_action_module(&action, "akeyless");
+        let out = generate_action_module(&action, "akeyless", "akeyless");
         assert!(out.contains("module: uid_generate_token"));
     }
 
     #[test]
     fn action_module_required_attribute_renders_in_argument_spec() {
         let action = sample_action();
-        let out = generate_action_module(&action, "test");
+        let out = generate_action_module(&action, "test", "akeyless");
         assert!(out.contains("'auth_method_name': {'type': 'str', 'required': True}"));
     }
 
@@ -3323,7 +3408,7 @@ mod tests {
         // the actual SDK method is encrypt_batch / decrypt_batch.
         action.schema = "BatchEncryptionRequestLine".to_string();
         action.sdk_method = Some("encrypt_batch".to_string());
-        let out = generate_action_module(&action, "test");
+        let out = generate_action_module(&action, "test", "akeyless");
         assert!(out.contains("call_api(module, client, \"encrypt_batch\", body)"));
         // Model class is still derived from schema (the body type is correct).
         assert!(out.contains("build_body(\"BatchEncryptionRequestLine\""));
@@ -3332,7 +3417,7 @@ mod tests {
     #[test]
     fn action_module_falls_back_to_derived_method_when_override_absent() {
         let action = sample_action();
-        let out = generate_action_module(&action, "test");
+        let out = generate_action_module(&action, "test", "akeyless");
         // sample_action.sdk_method is None → method derives from schema.
         assert!(out.contains("call_api(module, client, \"uid_generate_token\", body)"));
     }
@@ -3351,7 +3436,7 @@ mod tests {
         let mut resource = sample_resource();
         resource.crud.update_endpoint = None;
         resource.crud.update_schema = None;
-        let out = generate_resource_module(&resource, "test");
+        let out = generate_resource_module(&resource, "test", "akeyless");
         assert!(out.contains("def update_resource"));
         assert!(
             out.contains("update not supported"),
@@ -3371,7 +3456,7 @@ mod tests {
                 attr.immutable = true;
             }
         }
-        let out = generate_resource_module(&resource, "test");
+        let out = generate_resource_module(&resource, "test", "akeyless");
         assert!(out.contains("immutable after creation"));
         let comment_block_start = out.find("WARNING: The following fields").unwrap();
         let comment_block_end =
@@ -3393,7 +3478,7 @@ mod tests {
     #[test]
     fn snapshot_sensitive_field_emits_no_log_in_argspec_and_yaml() {
         let resource = sample_resource();
-        let out = generate_resource_module(&resource, "test");
+        let out = generate_resource_module(&resource, "test", "akeyless");
         // sample_resource declares `value` as sensitive.
         assert!(out.contains("'value': {'type': 'str', 'required': True, 'no_log': True}"));
         // YAML doc section between DOCUMENTATION and EXAMPLES.
@@ -3409,7 +3494,7 @@ mod tests {
     #[test]
     fn snapshot_mutating_action_changed_true_and_masks_response() {
         let action = sample_action();
-        let out = generate_action_module(&action, "test");
+        let out = generate_action_module(&action, "test", "akeyless");
         assert!(out.contains("module.exit_json(changed=True"));
         assert!(out.contains("_sensitive = {'token'}"));
     }
@@ -3419,7 +3504,7 @@ mod tests {
     fn snapshot_non_mutating_action_changed_false() {
         let mut action = sample_action();
         action.mutating = false;
-        let out = generate_action_module(&action, "test");
+        let out = generate_action_module(&action, "test", "akeyless");
         assert!(out.contains("module.exit_json(changed=False"));
     }
 
@@ -3429,7 +3514,7 @@ mod tests {
     fn snapshot_action_sdk_method_override_takes_priority() {
         let mut action = sample_action();
         action.sdk_method = Some("custom_batch_call".to_string());
-        let out = generate_action_module(&action, "test");
+        let out = generate_action_module(&action, "test", "akeyless");
         assert!(out.contains("call_api(module, client, \"custom_batch_call\", body)"));
         // The derived name MUST NOT appear in call_api.
         assert!(
@@ -3458,7 +3543,7 @@ mod tests {
             }],
             read_mapping: std::collections::BTreeMap::new(),
         };
-        let out = generate_data_source_module(&ds, "test");
+        let out = generate_data_source_module(&ds, "test", "akeyless");
         assert!(!out.contains("'state':"));
         assert!(!out.contains("def create_resource"));
         assert!(!out.contains("def update_resource"));
@@ -3477,7 +3562,7 @@ mod tests {
             m.insert("$.name".to_string(), "name".to_string());
             m
         };
-        let out = generate_resource_module(&resource, "test");
+        let out = generate_resource_module(&resource, "test", "akeyless");
         assert!(out.contains("def create_resource"));
         assert!(out.contains("def read_resource"));
         assert!(out.contains("def update_resource"));
