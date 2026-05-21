@@ -1,0 +1,87 @@
+name: release
+
+# Triggered on a pushed `vX.Y.Z` tag. Validates the package, then
+# (when the `CARGO_REGISTRY_TOKEN` repo secret is set AND the iac-forge
+# git dependency has been migrated to a crates.io version) publishes
+# to crates.io.
+#
+# BLOCKER: ansible-forge depends on `iac-forge` via git, not crates.io
+# (see Cargo.toml line 19). `cargo publish` rejects git-source deps -- a
+# crates.io publish requires path or version coordinates. The publish
+# step below is therefore inert until iac-forge ships a 0.x.y release on
+# crates.io and ansible-forge's Cargo.toml is bumped to depend on it
+# with a `version = "..."` constraint.
+#
+# Until that lands, this workflow still:
+#   - Builds and tests the crate
+#   - Runs `cargo package --no-verify` to confirm the manifest is sane
+#   - Creates a GitHub Release with the source tarball attached
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (informational; tag governs)'
+        required: false
+        type: string
+
+permissions:
+  contents: write   # required to cut the GitHub Release
+
+jobs:
+  publish_crate:
+    name: package + publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: cargo test --lib
+        run: cargo test --lib --verbose
+
+      - name: cargo package (no-verify; iac-forge git dep is not crates.io-publishable)
+        run: cargo package --no-verify --allow-dirty
+
+      - name: Publish to crates.io
+        # IMPORTANT: this step is intentionally inert until iac-forge ships
+        # on crates.io. When it does, drop the `false &&` guard, bump the
+        # Cargo.toml `iac-forge` dep to `version = "X"`, and re-tag.
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "[release] CARGO_REGISTRY_TOKEN not set -- skipping crates.io publish."
+            exit 0
+          fi
+          if grep -qE '^\s*iac-forge\s*=\s*\{\s*git' Cargo.toml; then
+            echo "[release] BLOCKER: Cargo.toml still depends on iac-forge via git."
+            echo "[release] crates.io rejects git deps; the iac-forge crate must ship first,"
+            echo "[release] then this manifest must be updated to a version-based dep."
+            echo "[release] Skipping publish until that lands."
+            exit 0
+          fi
+          cargo publish --token "${CARGO_REGISTRY_TOKEN}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            target/package/ansible-forge-*.crate
