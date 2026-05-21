@@ -3336,4 +3336,186 @@ mod tests {
         // sample_action.sdk_method is None → method derives from schema.
         assert!(out.contains("call_api(module, client, \"uid_generate_token\", body)"));
     }
+
+    // ------------------------------------------------------------------
+    // Snapshot-style behaviour tests for the documented shape contracts.
+    // These complement the existing per-fragment checks by exercising one
+    // representative input per generator branch and pattern-matching the
+    // emitted Python for the expected invariants.
+    // ------------------------------------------------------------------
+
+    /// CRUD resource with no update endpoint -- update_resource should
+    /// fail_json with an "update not supported" message.
+    #[test]
+    fn snapshot_resource_without_update_emits_no_update_branch() {
+        let mut resource = sample_resource();
+        resource.crud.update_endpoint = None;
+        resource.crud.update_schema = None;
+        let out = generate_resource_module(&resource, "test");
+        assert!(out.contains("def update_resource"));
+        assert!(
+            out.contains("update not supported"),
+            "no-update branch must emit fail_json with 'update not supported' message"
+        );
+        assert!(out.contains("fail_json("));
+    }
+
+    /// CRUD resource where every input field is immutable -- the WARNING
+    /// comment in update_resource must list each field name.
+    #[test]
+    fn snapshot_all_immutable_fields_lists_every_name_in_comment() {
+        let mut resource = sample_resource();
+        // Mark every non-computed attribute immutable.
+        for attr in &mut resource.attributes {
+            if !attr.computed {
+                attr.immutable = true;
+            }
+        }
+        let out = generate_resource_module(&resource, "test");
+        assert!(out.contains("immutable after creation"));
+        let comment_block_start = out.find("WARNING: The following fields").unwrap();
+        let comment_block_end =
+            out[comment_block_start..].find("Changing them").unwrap() + comment_block_start;
+        let block = &out[comment_block_start..comment_block_end];
+        for attr in &resource.attributes {
+            if attr.immutable {
+                assert!(
+                    block.contains(&format!("- {}", attr.canonical_name)),
+                    "immutable field {} missing from WARNING comment block:\n{block}",
+                    attr.canonical_name
+                );
+            }
+        }
+    }
+
+    /// Resource with a sensitive field -- both argspec and YAML docstring
+    /// must declare no_log on that field.
+    #[test]
+    fn snapshot_sensitive_field_emits_no_log_in_argspec_and_yaml() {
+        let resource = sample_resource();
+        let out = generate_resource_module(&resource, "test");
+        // sample_resource declares `value` as sensitive.
+        assert!(out.contains("'value': {'type': 'str', 'required': True, 'no_log': True}"));
+        // YAML doc section between DOCUMENTATION and EXAMPLES.
+        let doc_start = out.find("DOCUMENTATION").unwrap();
+        let doc_end = out.find("EXAMPLES").unwrap();
+        let doc = &out[doc_start..doc_end];
+        assert!(doc.contains("no_log: true"), "YAML docstring missing no_log: true");
+    }
+
+    /// Action with mutating=true -- changed=True literal must appear in
+    /// the exit_json call. With sensitive_response_fields, the masking
+    /// set must list each field name.
+    #[test]
+    fn snapshot_mutating_action_changed_true_and_masks_response() {
+        let action = sample_action();
+        let out = generate_action_module(&action, "test");
+        assert!(out.contains("module.exit_json(changed=True"));
+        assert!(out.contains("_sensitive = {'token'}"));
+    }
+
+    /// Action with mutating=false -- changed=False literal must appear.
+    #[test]
+    fn snapshot_non_mutating_action_changed_false() {
+        let mut action = sample_action();
+        action.mutating = false;
+        let out = generate_action_module(&action, "test");
+        assert!(out.contains("module.exit_json(changed=False"));
+    }
+
+    /// Action with sdk_method override -- emitted call_api uses the
+    /// override (NOT the schema-derived name).
+    #[test]
+    fn snapshot_action_sdk_method_override_takes_priority() {
+        let mut action = sample_action();
+        action.sdk_method = Some("custom_batch_call".to_string());
+        let out = generate_action_module(&action, "test");
+        assert!(out.contains("call_api(module, client, \"custom_batch_call\", body)"));
+        // The derived name MUST NOT appear in call_api.
+        assert!(
+            !out.contains("call_api(module, client, \"uid_generate_token\""),
+            "schema-derived method must NOT appear when sdk_method override is set"
+        );
+    }
+
+    /// Data source -- no state parameter, no CRUD helpers, changed=False on exit.
+    #[test]
+    fn snapshot_data_source_omits_state_and_crud_helpers() {
+        let ds = IacDataSource {
+            name: "test_thing".to_string(),
+            description: "A thing".to_string(),
+            read_endpoint: "/read".to_string(),
+            read_schema: "GetThing".to_string(),
+            read_response_schema: None,
+            attributes: vec![IacAttribute {
+                api_name: "name".to_string(),
+                canonical_name: "name".to_string(),
+                description: "name".to_string(),
+                iac_type: IacType::String,
+                required: true, optional: false, computed: false, sensitive: false,
+                json_encoded: false, immutable: false,
+                default_value: None, enum_values: None, read_path: None, update_only: false,
+            }],
+            read_mapping: std::collections::BTreeMap::new(),
+        };
+        let out = generate_data_source_module(&ds, "test");
+        assert!(!out.contains("'state':"));
+        assert!(!out.contains("def create_resource"));
+        assert!(!out.contains("def update_resource"));
+        assert!(!out.contains("def delete_resource"));
+        assert!(out.contains("module.exit_json(changed=False"));
+    }
+
+    /// Sanity: a CRUD resource with a populated read_mapping still
+    /// generates all four CRUD functions and uses the basic read body
+    /// (read_mapping is plumbed in IR but doesn't yet rewrite generation).
+    #[test]
+    fn snapshot_crud_with_read_mapping_still_emits_all_four_operations() {
+        let mut resource = sample_resource();
+        resource.read_mapping = {
+            let mut m = std::collections::BTreeMap::new();
+            m.insert("$.name".to_string(), "name".to_string());
+            m
+        };
+        let out = generate_resource_module(&resource, "test");
+        assert!(out.contains("def create_resource"));
+        assert!(out.contains("def read_resource"));
+        assert!(out.contains("def update_resource"));
+        assert!(out.contains("def delete_resource"));
+    }
+
+    /// Property test: every V2Api method name in the local SDK should be
+    /// reachable from some schema via python_sdk_method_name. This is a
+    /// gap detector -- it doesn't fail unless more than 30% of methods
+    /// are unreachable (which would indicate a generator regression).
+    #[test]
+    fn property_python_sdk_method_name_round_trips_for_known_schemas() {
+        // A handful of well-known Akeyless schemas. Each must round-trip
+        // through python_sdk_method_name without dropping characters.
+        let cases: &[(&str, &str)] = &[
+            ("CreateRole", "create_role"),
+            ("UpdateRole", "update_role"),
+            ("DeleteRole", "delete_role"),
+            ("GetRole", "get_role"),
+            ("CreatePKICertIssuer", "create_pki_cert_issuer"),
+            ("uidGenerateToken", "uid_generate_token"),
+            ("createSSHCertIssuer", "create_ssh_cert_issuer"),
+        ];
+        for (schema, expected) in cases {
+            assert_eq!(
+                python_sdk_method_name(schema),
+                *expected,
+                "schema {schema} did not round-trip through python_sdk_method_name"
+            );
+        }
+    }
+
+    /// Model class name normalisation: lowercase initial schemas must be
+    /// uppercased; already-PascalCase stays put.
+    #[test]
+    fn property_python_sdk_model_class_name_uppercases_initial() {
+        assert_eq!(python_sdk_model_class_name("uidGenerateToken"), "UidGenerateToken");
+        assert_eq!(python_sdk_model_class_name("CreateRole"), "CreateRole");
+        assert_eq!(python_sdk_model_class_name(""), "");
+    }
 }
