@@ -4,7 +4,60 @@
 //! Each generated module follows the standard Ansible module layout with
 //! `DOCUMENTATION`, `EXAMPLES`, `RETURN` docstrings, and a `main()` function.
 
-use iac_forge::{IacAttribute, IacDataSource, IacResource, IacType, strip_provider_prefix};
+use iac_forge::{
+    IacAction, IacAttribute, IacDataSource, IacResource, IacType, strip_provider_prefix,
+};
+
+/// Convert an `OpenAPI` schema name (camelCase / `PascalCase`) to the Python
+/// SDK method name emitted by `openapi-generator-cli`'s `python` template.
+///
+/// Mirrors `inflection.underscore`: insert `_` between a lowercase→uppercase
+/// boundary, and between an uppercase run and a following `Upper+lower`
+/// pair (so `CreatePKICertIssuer` → `create_pki_cert_issuer`, not
+/// `create_p_k_i_cert_issuer`). Hyphens are also converted to underscores.
+#[must_use]
+fn python_sdk_method_name(schema_name: &str) -> String {
+    let chars: Vec<char> = schema_name.chars().collect();
+    let mut out = String::with_capacity(chars.len() + 4);
+    for (i, &ch) in chars.iter().enumerate() {
+        if ch == '-' {
+            out.push('_');
+            continue;
+        }
+        if ch.is_ascii_uppercase() && i > 0 {
+            let prev = chars[i - 1];
+            let next = chars.get(i + 1).copied();
+            let prev_is_lower_or_digit = prev.is_ascii_lowercase() || prev.is_ascii_digit();
+            let next_is_lower = next.is_some_and(|c| c.is_ascii_lowercase());
+            // Boundary 1: aB → a_B (lowercase/digit followed by uppercase).
+            // Boundary 2: ABc → A_Bc (uppercase run terminator).
+            if prev_is_lower_or_digit || (prev.is_ascii_uppercase() && next_is_lower) {
+                out.push('_');
+            }
+        }
+        for lower in ch.to_lowercase() {
+            out.push(lower);
+        }
+    }
+    out
+}
+
+/// Convert an `OpenAPI` schema name to the Python SDK model class name.
+///
+/// The `openapi-generator-cli` python template preserves the schema name's
+/// `PascalCase` exactly; the only adjustment is to uppercase the first
+/// character if the schema starts with a lowercase letter.
+#[must_use]
+fn python_sdk_model_class_name(schema_name: &str) -> String {
+    let mut chars = schema_name.chars();
+    match chars.next() {
+        Some(c) => {
+            let head: String = c.to_uppercase().collect();
+            head + chars.as_str()
+        }
+        None => String::new(),
+    }
+}
 
 /// Extension trait mapping [`IacType`] to Ansible `argument_spec` type strings.
 ///
@@ -28,13 +81,15 @@ pub trait AnsibleTypeExt {
 impl AnsibleTypeExt for IacType {
     fn ansible_type(&self) -> &'static str {
         match self {
-            Self::String | Self::Any => "str",
             Self::Integer => "int",
-            Self::Float => "float",
+            Self::Float | Self::Numeric => "float",
             Self::Boolean => "bool",
             Self::List(_) | Self::Set(_) => "list",
             Self::Map(_) | Self::Object { .. } => "dict",
             Self::Enum { underlying, .. } => underlying.ansible_type(),
+            // IacType is #[non_exhaustive]; default to "str" for unknown
+            // variants and for String/Any explicitly.
+            _ => "str",
         }
     }
 
@@ -207,17 +262,58 @@ fn immutable_fields_comment(resource: &IacResource) -> String {
     )
 }
 
+/// Render the `update_resource` Python function body for a resource.
+///
+/// Two flavours:
+/// - With `update_schema`: call the SDK update method via `call_api`.
+/// - Without: emit a `fail_json` with an "update not supported" message,
+///   mirroring `terraform-forge::render_no_update`.
+fn render_update_function(resource: &IacResource, module_name: &str) -> String {
+    let immutable_comment = immutable_fields_comment(resource);
+    match (
+        resource.crud.update_endpoint.as_deref(),
+        resource.crud.update_schema.as_deref(),
+    ) {
+        (Some(_), Some(update_schema)) => {
+            let method = python_sdk_method_name(update_schema);
+            let class = python_sdk_model_class_name(update_schema);
+            format!(
+                r#"def update_resource(module, client, token):
+    """Update the resource."""{immutable_comment}
+    # TODO(phase-1b): use read_mapping for honest diff
+    body = build_body("{class}", dict(module.params, token=token))
+    return call_api(module, client, "{method}", body)
+"#
+            )
+        }
+        _ => format!(
+            r#"def update_resource(module, client, token):
+    """Update not supported by the upstream API -- delete + recreate instead."""{immutable_comment}
+    module.fail_json(msg="{module_name}: update not supported, delete+recreate")
+"#
+        ),
+    }
+}
+
 /// Format the Python source for a resource module from pre-built fragments.
 fn format_resource_python(
+    resource: &IacResource,
     module_name: &str,
     description: &str,
     options_yaml: &str,
     return_yaml: &str,
     argument_spec: &str,
-    immutable_comment: &str,
 ) -> String {
     let state_spec = state_spec_entry();
     let header = PYTHON_HEADER;
+    let create_class = python_sdk_model_class_name(&resource.crud.create_schema);
+    let create_method = python_sdk_method_name(&resource.crud.create_schema);
+    let read_class = python_sdk_model_class_name(&resource.crud.read_schema);
+    let read_method = python_sdk_method_name(&resource.crud.read_schema);
+    let delete_class = python_sdk_model_class_name(&resource.crud.delete_schema);
+    let delete_method = python_sdk_method_name(&resource.crud.delete_schema);
+    let id_field = &resource.identity.id_field;
+    let update_function = render_update_function(resource, module_name);
     format!(
         r#"{header}
 
@@ -251,48 +347,39 @@ RETURN = r'''
 '''
 
 from ansible.module_utils.basic import AnsibleModule
+from ansible_collections.akeyless.akeyless.plugins.module_utils.akeyless_client import (
+    get_client, call_api, build_body,
+)
 
 
-def create_resource(module):
+def create_resource(module, client, token):
     """Create the resource."""
-    try:
-        # TODO: implement API call
-        module.exit_json(changed=True, msg="{module_name} created")
-    except Exception as e:
-        module.fail_json(msg="Failed to create {module_name}: %s" % str(e))
+    body = build_body("{create_class}", dict(module.params, token=token))
+    return call_api(module, client, "{create_method}", body)
 
 
-def update_resource(module):
-    """Update the resource."""{immutable_comment}
-    try:
-        # TODO: implement API call
-        module.exit_json(changed=True, msg="{module_name} updated")
-    except Exception as e:
-        module.fail_json(msg="Failed to update {module_name}: %s" % str(e))
+{update_function}
 
-
-def delete_resource(module):
+def delete_resource(module, client, token):
     """Delete the resource."""
-    try:
-        # TODO: implement API call
-        module.exit_json(changed=True, msg="{module_name} deleted")
-    except Exception as e:
-        module.fail_json(msg="Failed to delete {module_name}: %s" % str(e))
+    body = build_body("{delete_class}", dict(module.params, token=token))
+    return call_api(module, client, "{delete_method}", body)
 
 
-def read_resource(module):
-    """Read the current state of the resource."""
-    try:
-        # TODO: implement API call
-        return None
-    except Exception as e:
-        module.fail_json(msg="Failed to read {module_name}: %s" % str(e))
+def read_resource(module, client, token):
+    """Read the current state of the resource. Returns None if absent."""
+    body = build_body("{read_class}", {{"{id_field}": module.params.get("{id_field}"), "token": token}})
+    return call_api(module, client, "{read_method}", body, swallow_404=True)
 
 
 def main():
     argument_spec = {{
 {state_spec}
 {argument_spec}
+        'gateway_url': {{'type': 'str'}},
+        'access_id': {{'type': 'str'}},
+        'access_key': {{'type': 'str', 'no_log': True}},
+        'access_type': {{'type': 'str', 'default': 'access_key'}},
     }}
 
     module = AnsibleModule(
@@ -300,23 +387,25 @@ def main():
         supports_check_mode=True,
     )
 
+    client, token = get_client(module)
     state = module.params.get('state', 'present')
-    current = read_resource(module)
+    current = read_resource(module, client, token)
 
     if module.check_mode:
-        module.exit_json(changed=(current is None and state == 'present')
-                         or (current is not None and state == 'absent'))
+        changed = (current is None and state == 'present') or (current is not None and state == 'absent')
+        module.exit_json(changed=changed)
 
     if state == 'absent':
         if current is not None:
-            delete_resource(module)
-        else:
-            module.exit_json(changed=False, msg="{module_name} already absent")
+            result = delete_resource(module, client, token)
+            module.exit_json(changed=True, result=result)
+        module.exit_json(changed=False, msg="{module_name} already absent")
     else:
         if current is None:
-            create_resource(module)
-        else:
-            update_resource(module)
+            result = create_resource(module, client, token)
+            module.exit_json(changed=True, result=result)
+        result = update_resource(module, client, token)
+        module.exit_json(changed=True, result=result)
 
 
 if __name__ == '__main__':
@@ -351,15 +440,118 @@ pub fn generate_resource_module(resource: &IacResource, provider_name: &str) -> 
     let module_name = strip_provider_prefix(&resource.name, provider_name);
     let description = resource.description.replace('"', "'");
     let frags = ModuleFragments::from_attributes(&resource.attributes);
-    let immutable_comment = immutable_fields_comment(resource);
 
     format_resource_python(
+        resource,
         module_name,
         &description,
         &frags.options_yaml,
         &frags.return_yaml,
         &frags.argument_spec,
-        &immutable_comment,
+    )
+}
+
+/// Build a Python set literal from a list of strings.
+///
+/// Empty list → `set()` (valid empty-set literal). Non-empty → `{'a', 'b'}`.
+fn python_set_literal(items: &[String]) -> String {
+    if items.is_empty() {
+        return "set()".to_string();
+    }
+    let inner = items
+        .iter()
+        .map(|s| format!("'{}'", s.replace('\'', "\\'")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{{inner}}}")
+}
+
+/// Generate a complete Python module for an RPC-style action.
+///
+/// Actions are one-shot calls — no `state` parameter, no read step. The
+/// generated module always calls the underlying SDK method, then masks any
+/// `sensitive_response_fields` before echoing the result. `changed=` is
+/// set from [`IacAction::mutating`].
+///
+/// Check-mode is disabled (`supports_check_mode=False`) because action
+/// endpoints have side effects that can't be simulated.
+#[must_use]
+pub fn generate_action_module(action: &IacAction, provider_name: &str) -> String {
+    let module_name = strip_provider_prefix(&action.name, provider_name);
+    let description = action.description.replace('"', "'");
+    let frags = ModuleFragments::from_attributes(&action.attributes);
+    let header = PYTHON_HEADER;
+    let options_yaml = &frags.options_yaml;
+    let argument_spec = &frags.argument_spec;
+    let model_class = python_sdk_model_class_name(&action.schema);
+    // Allow TOML to override the SDK method name (e.g. for batch endpoints
+    // where the request body schema differs from the SDK method).
+    let method_name = action
+        .sdk_method
+        .clone()
+        .unwrap_or_else(|| python_sdk_method_name(&action.schema));
+    let sensitive_set = python_set_literal(&action.sensitive_response_fields);
+    let changed_literal = if action.mutating { "True" } else { "False" };
+    format!(
+        r#"{header}
+
+DOCUMENTATION = r'''
+---
+module: {module_name}
+short_description: {description}
+description:
+  - {description}
+options:
+{options_yaml}
+'''
+
+EXAMPLES = r'''
+- name: Run {module_name}
+  {module_name}:
+  register: result
+'''
+
+RETURN = r'''
+result:
+  description: "Raw result of the action call"
+  type: dict
+  returned: success
+'''
+
+from ansible.module_utils.basic import AnsibleModule
+from ansible_collections.akeyless.akeyless.plugins.module_utils.akeyless_client import (
+    get_client, call_api, build_body,
+)
+
+
+def run_action(module, client, token):
+    """Invoke the action and return the SDK response."""
+    body = build_body("{model_class}", dict(module.params, token=token))
+    return call_api(module, client, "{method_name}", body)
+
+
+def main():
+    argument_spec = {{
+{argument_spec}
+        'gateway_url': {{'type': 'str'}},
+        'access_id': {{'type': 'str'}},
+        'access_key': {{'type': 'str', 'no_log': True}},
+        'access_type': {{'type': 'str', 'default': 'access_key'}},
+    }}
+
+    module = AnsibleModule(argument_spec=argument_spec, supports_check_mode=False)
+
+    client, token = get_client(module)
+    result = run_action(module, client, token)
+    # Mask sensitive response fields before echoing back to the user.
+    _sensitive = {sensitive_set}
+    masked = {{ k: ('***' if k in _sensitive else v) for k, v in (result or {{}}).items() }}
+    module.exit_json(changed={changed_literal}, result=masked)
+
+
+if __name__ == '__main__':
+    main()
+"#
     )
 }
 
@@ -377,6 +569,8 @@ pub fn generate_data_source_module(ds: &IacDataSource, provider_name: &str) -> S
     let options_yaml = &frags.options_yaml;
     let return_yaml = &frags.return_yaml;
     let argument_spec = &frags.argument_spec;
+    let read_class = python_sdk_model_class_name(&ds.read_schema);
+    let read_method = python_sdk_method_name(&ds.read_schema);
     format!(
         r#"{header}
 
@@ -401,20 +595,24 @@ RETURN = r'''
 '''
 
 from ansible.module_utils.basic import AnsibleModule
+from ansible_collections.akeyless.akeyless.plugins.module_utils.akeyless_client import (
+    get_client, call_api, build_body,
+)
 
 
-def read_resource(module):
+def read_resource(module, client, token):
     """Read the data source."""
-    try:
-        # TODO: implement API call
-        return {{}}
-    except Exception as e:
-        module.fail_json(msg="Failed to read {module_name}: %s" % str(e))
+    body = build_body("{read_class}", dict(module.params, token=token))
+    return call_api(module, client, "{read_method}", body)
 
 
 def main():
     argument_spec = {{
 {argument_spec}
+        'gateway_url': {{'type': 'str'}},
+        'access_id': {{'type': 'str'}},
+        'access_key': {{'type': 'str', 'no_log': True}},
+        'access_type': {{'type': 'str', 'default': 'access_key'}},
     }}
 
     module = AnsibleModule(
@@ -422,11 +620,9 @@ def main():
         supports_check_mode=True,
     )
 
-    try:
-        result = read_resource(module)
-        module.exit_json(changed=False, **result)
-    except Exception as e:
-        module.fail_json(msg=str(e))
+    client, token = get_client(module)
+    result = read_resource(module, client, token) or {{}}
+    module.exit_json(changed=False, result=result)
 
 
 if __name__ == '__main__':
@@ -557,6 +753,7 @@ mod tests {
                 import_field: "name".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         }
     }
 
@@ -664,7 +861,7 @@ mod tests {
                 values: vec!["x".into()],
                 underlying: Box::new(IacType::String),
             },
-            required: false, computed: false, sensitive: false, immutable: false,
+            required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
             default_value: None,
             enum_values: Some(vec!["y".into()]),
             read_path: None,
@@ -680,7 +877,7 @@ mod tests {
             canonical_name: "t".into(),
             description: String::new(),
             iac_type: IacType::String,
-            required: false, computed: false, sensitive: false, immutable: false,
+            required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
             default_value: None,
             enum_values: Some(vec!["a".into(), "b".into()]),
             read_path: None,
@@ -696,7 +893,7 @@ mod tests {
             canonical_name: "t".into(),
             description: String::new(),
             iac_type: IacType::String,
-            required: false, computed: false, sensitive: false, immutable: false,
+            required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
             default_value: None,
             enum_values: None,
             read_path: None,
@@ -769,15 +966,16 @@ mod tests {
                 canonical_name: "name".to_string(),
                 description: "Secret name".to_string(),
                 iac_type: IacType::String,
-                required: true,
+                required: true, optional: false,
                 computed: false,
-                sensitive: false,
+                sensitive: false, json_encoded: false,
                 immutable: false,
                 default_value: None,
                 enum_values: None,
                 read_path: None,
                 update_only: false,
             }],
+            read_mapping: std::collections::BTreeMap::new(),
         };
         let output = generate_data_source_module(&ds, "test");
         assert!(
@@ -845,15 +1043,16 @@ mod tests {
                 canonical_name: "name".to_string(),
                 description: "Secret name".to_string(),
                 iac_type: IacType::String,
-                required: true,
+                required: true, optional: false,
                 computed: false,
-                sensitive: false,
+                sensitive: false, json_encoded: false,
                 immutable: false,
                 default_value: None,
                 enum_values: None,
                 read_path: None,
                 update_only: false,
             }],
+            read_mapping: std::collections::BTreeMap::new(),
         };
         let output = generate_data_source_module(&ds, "test");
         assert!(output.contains("module: secret_info_info"));
@@ -882,30 +1081,26 @@ mod tests {
     }
 
     #[test]
-    fn resource_module_has_error_handling() {
+    fn resource_module_uses_call_api_for_all_crud() {
+        // Each CRUD function should route through the shared call_api helper,
+        // which centralises ApiException -> module.fail_json mapping.
         let resource = sample_resource();
         let output = generate_resource_module(&resource, "test");
-        // All CRUD functions should have try/except with module.fail_json
+        // create / delete / read always go through call_api.
+        let call_api_count = output.matches("call_api(module, client,").count();
         assert!(
-            output.contains("module.fail_json(msg=\"Failed to create"),
-            "create_resource must have fail_json error handling"
+            call_api_count >= 3,
+            "expected at least 3 call_api uses (create/delete/read), got {call_api_count}:\n{output}"
         );
+        // sample_resource has update_endpoint set so update_resource also uses call_api.
         assert!(
-            output.contains("module.fail_json(msg=\"Failed to update"),
-            "update_resource must have fail_json error handling"
-        );
-        assert!(
-            output.contains("module.fail_json(msg=\"Failed to delete"),
-            "delete_resource must have fail_json error handling"
-        );
-        assert!(
-            output.contains("module.fail_json(msg=\"Failed to read"),
-            "read_resource must have fail_json error handling"
+            output.contains("# TODO(phase-1b): use read_mapping for honest diff"),
+            "update_resource should carry the phase-1b TODO"
         );
     }
 
     #[test]
-    fn data_source_module_has_error_handling() {
+    fn data_source_module_uses_call_api() {
         let ds = IacDataSource {
             name: "test_secret_info".to_string(),
             description: "Get secret information".to_string(),
@@ -913,11 +1108,12 @@ mod tests {
             read_schema: "ReadBody".to_string(),
             read_response_schema: None,
             attributes: vec![],
+            read_mapping: std::collections::BTreeMap::new(),
         };
         let output = generate_data_source_module(&ds, "test");
         assert!(
-            output.contains("module.fail_json("),
-            "data source must have fail_json error handling"
+            output.contains("call_api(module, client,"),
+            "data source read should route through call_api"
         );
     }
 
@@ -970,7 +1166,7 @@ mod tests {
     }
 
     #[test]
-    fn data_source_returns_empty_dict() {
+    fn data_source_main_handles_missing_result() {
         let ds = IacDataSource {
             name: "test_info".to_string(),
             description: "Test data source".to_string(),
@@ -978,12 +1174,14 @@ mod tests {
             read_schema: "ReadBody".to_string(),
             read_response_schema: None,
             attributes: vec![],
+            read_mapping: std::collections::BTreeMap::new(),
         };
         let output = generate_data_source_module(&ds, "test");
-        // The data source read_resource should return {} (empty dict)
+        // main() must default a missing read result to an empty dict before
+        // calling module.exit_json, never crash on None.
         assert!(
-            output.contains("return {}"),
-            "data source read_resource must return empty dict {{}}, got:\n{output}"
+            output.contains("read_resource(module, client, token) or {}"),
+            "data source main must coerce missing reads to empty dict, got:\n{output}"
         );
     }
 
@@ -1011,7 +1209,7 @@ mod tests {
                     canonical_name: "str_field".to_string(),
                     description: "A string".to_string(),
                     iac_type: IacType::String,
-                    required: false, computed: false, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -1019,7 +1217,7 @@ mod tests {
                     canonical_name: "int_field".to_string(),
                     description: "An int".to_string(),
                     iac_type: IacType::Integer,
-                    required: false, computed: false, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -1027,7 +1225,7 @@ mod tests {
                     canonical_name: "float_field".to_string(),
                     description: "A float".to_string(),
                     iac_type: IacType::Float,
-                    required: false, computed: false, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -1035,7 +1233,7 @@ mod tests {
                     canonical_name: "bool_field".to_string(),
                     description: "A bool".to_string(),
                     iac_type: IacType::Boolean,
-                    required: false, computed: false, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -1043,7 +1241,7 @@ mod tests {
                     canonical_name: "list_field".to_string(),
                     description: "A list".to_string(),
                     iac_type: IacType::List(Box::new(IacType::String)),
-                    required: false, computed: false, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -1051,7 +1249,7 @@ mod tests {
                     canonical_name: "set_field".to_string(),
                     description: "A set".to_string(),
                     iac_type: IacType::Set(Box::new(IacType::Integer)),
-                    required: false, computed: false, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -1059,7 +1257,7 @@ mod tests {
                     canonical_name: "map_field".to_string(),
                     description: "A map".to_string(),
                     iac_type: IacType::Map(Box::new(IacType::String)),
-                    required: false, computed: false, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -1067,7 +1265,7 @@ mod tests {
                     canonical_name: "obj_field".to_string(),
                     description: "An object".to_string(),
                     iac_type: IacType::Object { name: "Obj".to_string(), fields: vec![] },
-                    required: false, computed: false, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -1078,7 +1276,7 @@ mod tests {
                         values: vec!["x".into(), "y".into()],
                         underlying: Box::new(IacType::String),
                     },
-                    required: false, computed: false, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -1086,7 +1284,7 @@ mod tests {
                     canonical_name: "any_field".to_string(),
                     description: "An any".to_string(),
                     iac_type: IacType::Any,
-                    required: false, computed: false, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
             ],
@@ -1095,6 +1293,7 @@ mod tests {
                 import_field: "str_field".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1152,6 +1351,7 @@ mod tests {
                 import_field: "id".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_resource_module(&resource, "test");
@@ -1179,7 +1379,7 @@ mod tests {
                     canonical_name: "name".to_string(),
                     description: "Role name".to_string(),
                     iac_type: IacType::String,
-                    required: true, computed: false, sensitive: false, immutable: false,
+                    required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -1187,10 +1387,11 @@ mod tests {
                     canonical_name: "permissions".to_string(),
                     description: "Permissions".to_string(),
                     iac_type: IacType::List(Box::new(IacType::String)),
-                    required: false, computed: true, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: true, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
             ],
+            read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_data_source_module(&ds, "test");
@@ -1235,7 +1436,7 @@ mod tests {
     #[test]
     fn generate_all_produces_module_files() {
         use iac_forge::{AuthInfo, Backend, IacProvider};
-        use std::collections::HashMap;
+        use std::collections::BTreeMap;
 
         let backend = super::super::backend::AnsibleBackend::new();
         let provider = IacProvider {
@@ -1244,7 +1445,7 @@ mod tests {
             version: "0.1.0".to_string(),
             auth: AuthInfo::default(),
             skip_fields: vec![],
-            platform_config: HashMap::new(),
+            platform_config: BTreeMap::new(),
         };
 
         let resources = vec![sample_resource()];
@@ -1254,18 +1455,25 @@ mod tests {
             .generate_all(&provider, &resources, &data_sources)
             .expect("generate_all should succeed");
 
-        // 1 resource + 0 data sources + 0 provider + 1 test = 2
-        assert_eq!(artifacts.len(), 2);
+        // 1 resource + 0 data sources + 5 provider (client helper, galaxy, runtime,
+        // requirements, README) + 1 test = 7
+        assert_eq!(artifacts.len(), 7);
         assert!(artifacts.iter().any(|a| a.path.contains("plugins/modules/")));
         assert!(artifacts.iter().any(|a| a.path.contains("tests/integration/")));
+        assert!(artifacts.iter().any(|a| a.path == "galaxy.yml"));
+        assert!(artifacts.iter().any(|a| a.path == "plugins/module_utils/akeyless_client.py"));
 
         // Verify module content is valid
         for artifact in &artifacts {
             let path = std::path::Path::new(&artifact.path);
-            if path.extension().is_some_and(|ext| ext == "py") {
+            if path.extension().is_some_and(|ext| ext == "py")
+                && artifact.path.starts_with("plugins/modules/")
+            {
                 assert!(artifact.content.contains("AnsibleModule"));
             }
-            if path.extension().is_some_and(|ext| ext == "yml") {
+            if path.extension().is_some_and(|ext| ext == "yml")
+                && artifact.path.starts_with("tests/integration/")
+            {
                 assert!(artifact.content.contains("state: present"));
             }
         }
@@ -1294,6 +1502,7 @@ mod tests {
                 import_field: "id".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_resource_module(&resource, "test");
@@ -1351,7 +1560,7 @@ mod tests {
                     values: vec!["fast".into(), "slow".into()],
                     underlying: Box::new(IacType::String),
                 },
-                required: true, computed: false, sensitive: false, immutable: false,
+                required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             }],
             identity: IdentityInfo {
@@ -1359,6 +1568,7 @@ mod tests {
                 import_field: "mode".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_test_playbook(&resource, "test");
@@ -1389,7 +1599,7 @@ mod tests {
                     canonical_name: "count".to_string(),
                     description: "Count".to_string(),
                     iac_type: IacType::Integer,
-                    required: true, computed: false, sensitive: false, immutable: false,
+                    required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -1397,7 +1607,7 @@ mod tests {
                     canonical_name: "rate".to_string(),
                     description: "Rate".to_string(),
                     iac_type: IacType::Float,
-                    required: true, computed: false, sensitive: false, immutable: false,
+                    required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -1405,7 +1615,7 @@ mod tests {
                     canonical_name: "enabled".to_string(),
                     description: "Enabled".to_string(),
                     iac_type: IacType::Boolean,
-                    required: true, computed: false, sensitive: false, immutable: false,
+                    required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
             ],
@@ -1414,6 +1624,7 @@ mod tests {
                 import_field: "count".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_test_playbook(&resource, "test");
@@ -1430,7 +1641,7 @@ mod tests {
             canonical_name: "region".to_string(),
             description: "Region".to_string(),
             iac_type: IacType::String,
-            required: true, computed: false, sensitive: false, immutable: true,
+            required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: true,
             default_value: None, enum_values: None, read_path: None, update_only: false,
         });
         resource.attributes.push(IacAttribute {
@@ -1438,7 +1649,7 @@ mod tests {
             canonical_name: "zone".to_string(),
             description: "Zone".to_string(),
             iac_type: IacType::String,
-            required: false, computed: false, sensitive: false, immutable: true,
+            required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: true,
             default_value: None, enum_values: None, read_path: None, update_only: false,
         });
 
@@ -1473,7 +1684,7 @@ mod tests {
                     values: vec![],
                     underlying: Box::new(IacType::String),
                 },
-                required: true, computed: false, sensitive: false, immutable: false,
+                required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             }],
             identity: IdentityInfo {
@@ -1481,6 +1692,7 @@ mod tests {
                 import_field: "status".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_test_playbook(&resource, "test");
@@ -1512,7 +1724,7 @@ mod tests {
                 canonical_name: "tags".to_string(),
                 description: "Tags".to_string(),
                 iac_type: IacType::List(Box::new(IacType::String)),
-                required: true, computed: false, sensitive: false, immutable: false,
+                required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             }],
             identity: IdentityInfo {
@@ -1520,6 +1732,7 @@ mod tests {
                 import_field: "tags".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_test_playbook(&resource, "test");
@@ -1551,7 +1764,7 @@ mod tests {
                 canonical_name: "metadata".to_string(),
                 description: "Metadata".to_string(),
                 iac_type: IacType::Map(Box::new(IacType::String)),
-                required: true, computed: false, sensitive: false, immutable: false,
+                required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             }],
             identity: IdentityInfo {
@@ -1559,6 +1772,7 @@ mod tests {
                 import_field: "metadata".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_test_playbook(&resource, "test");
@@ -1590,7 +1804,7 @@ mod tests {
                 canonical_name: "label".to_string(),
                 description: "A label".to_string(),
                 iac_type: IacType::String,
-                required: false, computed: false, sensitive: false, immutable: false,
+                required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             }],
             identity: IdentityInfo {
@@ -1598,6 +1812,7 @@ mod tests {
                 import_field: "label".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_test_playbook(&resource, "test");
@@ -1627,7 +1842,7 @@ mod tests {
                 canonical_name: "tier".to_string(),
                 description: "The service tier".to_string(),
                 iac_type: IacType::String,
-                required: true, computed: false, sensitive: false, immutable: false,
+                required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                 default_value: None,
                 enum_values: Some(vec!["free".to_string(), "pro".to_string(), "enterprise".to_string()]),
                 read_path: None, update_only: false,
@@ -1637,6 +1852,7 @@ mod tests {
                 import_field: "tier".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_resource_module(&resource, "test");
@@ -1677,7 +1893,7 @@ mod tests {
                     values: vec!["low".to_string(), "high".to_string()],
                     underlying: Box::new(IacType::String),
                 },
-                required: false, computed: false, sensitive: false, immutable: false,
+                required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                 default_value: None,
                 enum_values: Some(vec!["low".to_string(), "high".to_string()]),
                 read_path: None, update_only: false,
@@ -1687,6 +1903,7 @@ mod tests {
                 import_field: "level".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_resource_module(&resource, "test");
@@ -1720,7 +1937,7 @@ mod tests {
                     canonical_name: "name".to_string(),
                     description: "The name".to_string(),
                     iac_type: IacType::String,
-                    required: true, computed: true, sensitive: false, immutable: false,
+                    required: true, optional: false, computed: true, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -1728,7 +1945,7 @@ mod tests {
                     canonical_name: "gen_id".to_string(),
                     description: "Server-generated ID".to_string(),
                     iac_type: IacType::String,
-                    required: false, computed: true, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: true, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
             ],
@@ -1737,6 +1954,7 @@ mod tests {
                 import_field: "name".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_resource_module(&resource, "test");
@@ -1776,7 +1994,7 @@ mod tests {
                 canonical_name: "field".to_string(),
                 description: "Field with \"quotes\" inside".to_string(),
                 iac_type: IacType::String,
-                required: false, computed: false, sensitive: false, immutable: false,
+                required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             }],
             identity: IdentityInfo {
@@ -1784,6 +2002,7 @@ mod tests {
                 import_field: "field".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_resource_module(&resource, "test");
@@ -1820,7 +2039,7 @@ mod tests {
                     canonical_name: "int_list".to_string(),
                     description: "List of ints".to_string(),
                     iac_type: IacType::List(Box::new(IacType::Integer)),
-                    required: false, computed: false, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -1828,7 +2047,7 @@ mod tests {
                     canonical_name: "bool_set".to_string(),
                     description: "Set of bools".to_string(),
                     iac_type: IacType::Set(Box::new(IacType::Boolean)),
-                    required: false, computed: false, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -1836,7 +2055,7 @@ mod tests {
                     canonical_name: "dict_list".to_string(),
                     description: "List of dicts".to_string(),
                     iac_type: IacType::List(Box::new(IacType::Map(Box::new(IacType::String)))),
-                    required: false, computed: false, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
             ],
@@ -1845,6 +2064,7 @@ mod tests {
                 import_field: "int_list".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_resource_module(&resource, "test");
@@ -1867,7 +2087,7 @@ mod tests {
                     canonical_name: "name".to_string(),
                     description: "Name".to_string(),
                     iac_type: IacType::String,
-                    required: true, computed: false, sensitive: false, immutable: false,
+                    required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -1875,10 +2095,11 @@ mod tests {
                     canonical_name: "password".to_string(),
                     description: "Secret password".to_string(),
                     iac_type: IacType::String,
-                    required: true, computed: false, sensitive: true, immutable: false,
+                    required: true, optional: false, computed: false, sensitive: true, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
             ],
+            read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_data_source_module(&ds, "test");
@@ -1907,7 +2128,7 @@ mod tests {
                     canonical_name: "name".to_string(),
                     description: "Name input".to_string(),
                     iac_type: IacType::String,
-                    required: true, computed: false, sensitive: false, immutable: false,
+                    required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -1915,7 +2136,7 @@ mod tests {
                     canonical_name: "size".to_string(),
                     description: "Size".to_string(),
                     iac_type: IacType::Integer,
-                    required: false, computed: true, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: true, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -1923,10 +2144,11 @@ mod tests {
                     canonical_name: "enabled".to_string(),
                     description: "Is enabled".to_string(),
                     iac_type: IacType::Boolean,
-                    required: false, computed: true, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: true, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
             ],
+            read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_data_source_module(&ds, "test");
@@ -1943,7 +2165,7 @@ mod tests {
     #[test]
     fn generate_all_with_resources_and_data_sources() {
         use iac_forge::{ArtifactKind, AuthInfo, Backend, IacProvider};
-        use std::collections::HashMap;
+        use std::collections::BTreeMap;
 
         let backend = super::super::backend::AnsibleBackend::new();
         let provider = IacProvider {
@@ -1952,7 +2174,7 @@ mod tests {
             version: "0.1.0".to_string(),
             auth: AuthInfo::default(),
             skip_fields: vec![],
-            platform_config: HashMap::new(),
+            platform_config: BTreeMap::new(),
         };
 
         let mut resource = sample_resource();
@@ -1965,16 +2187,19 @@ mod tests {
             read_schema: "Read".to_string(),
             read_response_schema: None,
             attributes: vec![],
+            read_mapping: std::collections::BTreeMap::new(),
         }];
 
         let artifacts = backend
             .generate_all(&provider, &[resource], &data_sources)
             .expect("generate_all should succeed");
 
-        assert_eq!(artifacts.len(), 3, "1 resource + 1 data source + 0 provider + 1 test = 3");
+        // 1 resource + 1 data source + 5 provider metadata + 1 test = 8
+        assert_eq!(artifacts.len(), 8);
         assert!(artifacts.iter().any(|a| a.kind == ArtifactKind::Resource));
         assert!(artifacts.iter().any(|a| a.kind == ArtifactKind::DataSource));
         assert!(artifacts.iter().any(|a| a.kind == ArtifactKind::Test));
+        assert!(artifacts.iter().any(|a| a.kind == ArtifactKind::Metadata));
 
         let ds_artifact = artifacts.iter().find(|a| a.kind == ArtifactKind::DataSource).unwrap();
         assert!(ds_artifact.path.ends_with("_info.py"));
@@ -2003,7 +2228,7 @@ mod tests {
                     canonical_name: "auto_id".to_string(),
                     description: "Auto-generated ID".to_string(),
                     iac_type: IacType::String,
-                    required: false, computed: true, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: true, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -2011,7 +2236,7 @@ mod tests {
                     canonical_name: "created_at".to_string(),
                     description: "Creation timestamp".to_string(),
                     iac_type: IacType::String,
-                    required: false, computed: true, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: true, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
             ],
@@ -2020,6 +2245,7 @@ mod tests {
                 import_field: "auto_id".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_resource_module(&resource, "test");
@@ -2072,9 +2298,10 @@ mod tests {
                     values: vec!["web".to_string(), "api".to_string(), "worker".to_string()],
                     underlying: Box::new(IacType::String),
                 },
-                required: true, computed: false, sensitive: false, immutable: false,
+                required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             }],
+            read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_data_source_module(&ds, "test");
@@ -2098,6 +2325,7 @@ mod tests {
             read_schema: "Read".to_string(),
             read_response_schema: None,
             attributes: vec![],
+            read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_data_source_module(&ds, "test");
@@ -2116,6 +2344,7 @@ mod tests {
             read_schema: "Read".to_string(),
             read_response_schema: None,
             attributes: vec![],
+            read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_data_source_module(&ds, "test");
@@ -2144,6 +2373,7 @@ mod tests {
             read_schema: "Read".to_string(),
             read_response_schema: None,
             attributes: vec![],
+            read_mapping: std::collections::BTreeMap::new(),
         };
         let output = generate_data_source_module(&ds, "test");
         assert!(output.starts_with("#!/usr/bin/python"));
@@ -2212,7 +2442,7 @@ mod tests {
                 canonical_name: "api_key".to_string(),
                 description: "API Key".to_string(),
                 iac_type: IacType::String,
-                required: true, computed: false, sensitive: true, immutable: false,
+                required: true, optional: false, computed: false, sensitive: true, json_encoded: false, immutable: false,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             }],
             identity: IdentityInfo {
@@ -2220,6 +2450,7 @@ mod tests {
                 import_field: "api_key".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_test_playbook(&resource, "test");
@@ -2252,7 +2483,7 @@ mod tests {
                     canonical_name: "count".to_string(),
                     description: "Count".to_string(),
                     iac_type: IacType::Integer,
-                    required: false, computed: true, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: true, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -2260,7 +2491,7 @@ mod tests {
                     canonical_name: "active".to_string(),
                     description: "Active".to_string(),
                     iac_type: IacType::Boolean,
-                    required: false, computed: true, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: true, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -2268,7 +2499,7 @@ mod tests {
                     canonical_name: "tags".to_string(),
                     description: "Tags".to_string(),
                     iac_type: IacType::List(Box::new(IacType::String)),
-                    required: false, computed: true, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: true, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
             ],
@@ -2277,6 +2508,7 @@ mod tests {
                 import_field: "count".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_resource_module(&resource, "test");
@@ -2311,7 +2543,7 @@ mod tests {
                     canonical_name: "input".to_string(),
                     description: "User input".to_string(),
                     iac_type: IacType::String,
-                    required: true, computed: false, sensitive: false, immutable: false,
+                    required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
                 IacAttribute {
@@ -2319,7 +2551,7 @@ mod tests {
                     canonical_name: "server_set".to_string(),
                     description: "Server set".to_string(),
                     iac_type: IacType::String,
-                    required: false, computed: true, sensitive: false, immutable: false,
+                    required: false, optional: false, computed: true, sensitive: false, json_encoded: false, immutable: false,
                     default_value: None, enum_values: None, read_path: None, update_only: false,
                 },
             ],
@@ -2328,6 +2560,7 @@ mod tests {
                 import_field: "input".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         };
 
         let output = generate_resource_module(&resource, "test");
@@ -2344,7 +2577,7 @@ mod tests {
                 canonical_name: "name".to_string(),
                 description: "A name".to_string(),
                 iac_type: IacType::String,
-                required: true, computed: false, sensitive: false, immutable: false,
+                required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             },
             IacAttribute {
@@ -2352,7 +2585,7 @@ mod tests {
                 canonical_name: "auto_id".to_string(),
                 description: "Generated ID".to_string(),
                 iac_type: IacType::String,
-                required: false, computed: true, sensitive: false, immutable: false,
+                required: false, optional: false, computed: true, sensitive: false, json_encoded: false, immutable: false,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             },
         ];
@@ -2369,7 +2602,7 @@ mod tests {
             canonical_name: "secret".to_string(),
             description: "A secret".to_string(),
             iac_type: IacType::String,
-            required: true, computed: false, sensitive: true, immutable: false,
+            required: true, optional: false, computed: false, sensitive: true, json_encoded: false, immutable: false,
             default_value: None, enum_values: None, read_path: None, update_only: false,
         }];
         let yaml = build_options_yaml(&attrs);
@@ -2383,7 +2616,7 @@ mod tests {
             canonical_name: "items".to_string(),
             description: "Items list".to_string(),
             iac_type: IacType::List(Box::new(IacType::Integer)),
-            required: false, computed: false, sensitive: false, immutable: false,
+            required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
             default_value: None, enum_values: None, read_path: None, update_only: false,
         }];
         let yaml = build_options_yaml(&attrs);
@@ -2405,7 +2638,7 @@ mod tests {
                 canonical_name: "id".to_string(),
                 description: "The ID".to_string(),
                 iac_type: IacType::String,
-                required: false, computed: true, sensitive: false, immutable: false,
+                required: false, optional: false, computed: true, sensitive: false, json_encoded: false, immutable: false,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             },
             IacAttribute {
@@ -2413,7 +2646,7 @@ mod tests {
                 canonical_name: "name".to_string(),
                 description: "The name".to_string(),
                 iac_type: IacType::String,
-                required: true, computed: false, sensitive: false, immutable: false,
+                required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             },
         ];
@@ -2431,7 +2664,7 @@ mod tests {
             canonical_name: "name".to_string(),
             description: "A name".to_string(),
             iac_type: IacType::String,
-            required: true, computed: false, sensitive: false, immutable: false,
+            required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
             default_value: None, enum_values: None, read_path: None, update_only: false,
         }];
         let yaml = build_return_yaml(&attrs);
@@ -2445,7 +2678,7 @@ mod tests {
             canonical_name: "note".to_string(),
             description: "A \"special\" note".to_string(),
             iac_type: IacType::String,
-            required: false, computed: true, sensitive: false, immutable: false,
+            required: false, optional: false, computed: true, sensitive: false, json_encoded: false, immutable: false,
             default_value: None, enum_values: None, read_path: None, update_only: false,
         }];
         let yaml = build_return_yaml(&attrs);
@@ -2460,7 +2693,7 @@ mod tests {
                 canonical_name: "host".to_string(),
                 description: "Host".to_string(),
                 iac_type: IacType::String,
-                required: true, computed: false, sensitive: false, immutable: false,
+                required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             },
             IacAttribute {
@@ -2468,7 +2701,7 @@ mod tests {
                 canonical_name: "port".to_string(),
                 description: "Port".to_string(),
                 iac_type: IacType::Integer,
-                required: false, computed: false, sensitive: false, immutable: false,
+                required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             },
             IacAttribute {
@@ -2476,7 +2709,7 @@ mod tests {
                 canonical_name: "token".to_string(),
                 description: "Token".to_string(),
                 iac_type: IacType::String,
-                required: true, computed: false, sensitive: true, immutable: false,
+                required: true, optional: false, computed: false, sensitive: true, json_encoded: false, immutable: false,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             },
         ];
@@ -2493,7 +2726,7 @@ mod tests {
             canonical_name: "gen_id".to_string(),
             description: "Generated".to_string(),
             iac_type: IacType::String,
-            required: false, computed: true, sensitive: false, immutable: false,
+            required: false, optional: false, computed: true, sensitive: false, json_encoded: false, immutable: false,
             default_value: None, enum_values: None, read_path: None, update_only: false,
         }];
         let spec = build_argument_spec(&attrs);
@@ -2510,7 +2743,7 @@ mod tests {
                 values: vec!["fast".into(), "slow".into()],
                 underlying: Box::new(IacType::String),
             },
-            required: false, computed: false, sensitive: false, immutable: false,
+            required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
             default_value: None, enum_values: None, read_path: None, update_only: false,
         }];
         let spec = build_argument_spec(&attrs);
@@ -2541,7 +2774,7 @@ mod tests {
                 canonical_name: "region".to_string(),
                 description: "Region".to_string(),
                 iac_type: IacType::String,
-                required: true, computed: false, sensitive: false, immutable: true,
+                required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: true,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             },
             IacAttribute {
@@ -2549,7 +2782,7 @@ mod tests {
                 canonical_name: "name".to_string(),
                 description: "Name".to_string(),
                 iac_type: IacType::String,
-                required: true, computed: false, sensitive: false, immutable: false,
+                required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             },
         ];
@@ -2565,7 +2798,7 @@ mod tests {
             canonical_name: "name".to_string(),
             description: "Name".to_string(),
             iac_type: IacType::String,
-            required: true, computed: false, sensitive: false, immutable: false,
+            required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
             default_value: None, enum_values: None, read_path: None, update_only: false,
         }];
         let names = resource.immutable_attribute_names();
@@ -2580,7 +2813,7 @@ mod tests {
             canonical_name: "name".to_string(),
             description: "Name".to_string(),
             iac_type: IacType::String,
-            required: true, computed: false, sensitive: false, immutable: false,
+            required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
             default_value: None, enum_values: None, read_path: None, update_only: false,
         }];
         let comment = immutable_fields_comment(&resource);
@@ -2596,7 +2829,7 @@ mod tests {
                 canonical_name: "region".to_string(),
                 description: "Region".to_string(),
                 iac_type: IacType::String,
-                required: true, computed: false, sensitive: false, immutable: true,
+                required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: true,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             },
             IacAttribute {
@@ -2604,7 +2837,7 @@ mod tests {
                 canonical_name: "zone".to_string(),
                 description: "Zone".to_string(),
                 iac_type: IacType::String,
-                required: false, computed: false, sensitive: false, immutable: true,
+                required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: true,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             },
         ];
@@ -2637,7 +2870,7 @@ mod tests {
                 canonical_name: "config".to_string(),
                 description: "Configuration object".to_string(),
                 iac_type: IacType::Object { name: "Config".into(), fields: vec![] },
-                required: true, computed: false, sensitive: false, immutable: false,
+                required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             }],
             identity: IdentityInfo {
@@ -2645,6 +2878,7 @@ mod tests {
                 import_field: "config".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         };
         let output = generate_test_playbook(&resource, "test");
         assert!(output.contains("config: \"test_value\""));
@@ -2663,9 +2897,10 @@ mod tests {
                 canonical_name: "ids".to_string(),
                 description: "List of IDs".to_string(),
                 iac_type: IacType::List(Box::new(IacType::Integer)),
-                required: true, computed: false, sensitive: false, immutable: false,
+                required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             }],
+            read_mapping: std::collections::BTreeMap::new(),
         };
         let output = generate_data_source_module(&ds, "test");
         assert!(output.contains("'ids': {'type': 'list', 'required': True, 'elements': 'int'}"));
@@ -2675,10 +2910,10 @@ mod tests {
     fn resource_module_crud_functions_present() {
         let resource = sample_resource();
         let output = generate_resource_module(&resource, "test");
-        assert!(output.contains("def create_resource(module):"));
-        assert!(output.contains("def update_resource(module):"));
-        assert!(output.contains("def delete_resource(module):"));
-        assert!(output.contains("def read_resource(module):"));
+        assert!(output.contains("def create_resource(module, client, token):"));
+        assert!(output.contains("def update_resource(module, client, token):"));
+        assert!(output.contains("def delete_resource(module, client, token):"));
+        assert!(output.contains("def read_resource(module, client, token):"));
         assert!(output.contains("def main():"));
     }
 
@@ -2687,11 +2922,11 @@ mod tests {
         let resource = sample_resource();
         let output = generate_resource_module(&resource, "test");
         assert!(output.contains("state = module.params.get('state', 'present')"));
-        assert!(output.contains("current = read_resource(module)"));
+        assert!(output.contains("current = read_resource(module, client, token)"));
         assert!(output.contains("if state == 'absent':"));
-        assert!(output.contains("create_resource(module)"));
-        assert!(output.contains("update_resource(module)"));
-        assert!(output.contains("delete_resource(module)"));
+        assert!(output.contains("create_resource(module, client, token)"));
+        assert!(output.contains("update_resource(module, client, token)"));
+        assert!(output.contains("delete_resource(module, client, token)"));
     }
 
     #[test]
@@ -2703,6 +2938,7 @@ mod tests {
             read_schema: "Read".to_string(),
             read_response_schema: None,
             attributes: vec![],
+            read_mapping: std::collections::BTreeMap::new(),
         };
         let output = generate_data_source_module(&ds, "test");
         assert!(output.contains("from ansible.module_utils.basic import AnsibleModule"));
@@ -2717,7 +2953,7 @@ mod tests {
             canonical_name: "tier".to_string(),
             description: "Service tier".to_string(),
             iac_type: IacType::String,
-            required: false, computed: false, sensitive: false, immutable: false,
+            required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
             default_value: None,
             enum_values: Some(vec!["free".into(), "pro".into()]),
             read_path: None, update_only: false,
@@ -2733,7 +2969,7 @@ mod tests {
             canonical_name: "tier".to_string(),
             description: "Service tier".to_string(),
             iac_type: IacType::String,
-            required: false, computed: false, sensitive: false, immutable: false,
+            required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
             default_value: None,
             enum_values: Some(vec!["free".into(), "pro".into()]),
             read_path: None, update_only: false,
@@ -2752,7 +2988,7 @@ mod tests {
                 values: vec!["a".into(), "b".into()],
                 underlying: Box::new(IacType::String),
             },
-            required: false, computed: false, sensitive: false, immutable: false,
+            required: false, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
             default_value: None,
             enum_values: Some(vec!["a".into(), "b".into()]),
             read_path: None, update_only: false,
@@ -2782,6 +3018,7 @@ mod tests {
             read_schema: "Read".to_string(),
             read_response_schema: None,
             attributes: vec![],
+            read_mapping: std::collections::BTreeMap::new(),
         };
         let output = generate_data_source_module(&ds, "test");
         let examples = &output[output.find("EXAMPLES").unwrap()..output.find("RETURN").unwrap()];
@@ -2810,7 +3047,7 @@ mod tests {
                 canonical_name: "data".to_string(),
                 description: "Any data".to_string(),
                 iac_type: IacType::Any,
-                required: true, computed: false, sensitive: false, immutable: false,
+                required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             }],
             identity: IdentityInfo {
@@ -2818,6 +3055,7 @@ mod tests {
                 import_field: "data".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         };
         let output = generate_test_playbook(&resource, "test");
         assert!(output.contains("data: \"test_value\""));
@@ -2844,7 +3082,7 @@ mod tests {
                 canonical_name: "labels".to_string(),
                 description: "Labels".to_string(),
                 iac_type: IacType::Set(Box::new(IacType::String)),
-                required: true, computed: false, sensitive: false, immutable: false,
+                required: true, optional: false, computed: false, sensitive: false, json_encoded: false, immutable: false,
                 default_value: None, enum_values: None, read_path: None, update_only: false,
             }],
             identity: IdentityInfo {
@@ -2852,8 +3090,250 @@ mod tests {
                 import_field: "labels".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         };
         let output = generate_test_playbook(&resource, "test");
         assert!(output.contains("labels: \"test_value\""));
+    }
+
+    // ── Phase 1 contract: real SDK calls ───────────────────────────────
+
+    #[test]
+    fn resource_module_imports_akeyless_client_helper() {
+        let resource = sample_resource();
+        let output = generate_resource_module(&resource, "test");
+        assert!(
+            output.contains(
+                "from ansible_collections.akeyless.akeyless.plugins.module_utils.akeyless_client import"
+            ),
+            "resource module must import from the shared akeyless_client helper"
+        );
+        assert!(output.contains("get_client, call_api, build_body"));
+    }
+
+    #[test]
+    fn data_source_module_imports_akeyless_client_helper() {
+        let ds = IacDataSource {
+            name: "test_thing_info".to_string(),
+            description: "thing".to_string(),
+            read_endpoint: "/read".to_string(),
+            read_schema: "ReadThing".to_string(),
+            read_response_schema: None,
+            attributes: vec![],
+            read_mapping: std::collections::BTreeMap::new(),
+        };
+        let output = generate_data_source_module(&ds, "test");
+        assert!(output.contains(
+            "from ansible_collections.akeyless.akeyless.plugins.module_utils.akeyless_client import"
+        ));
+    }
+
+    #[test]
+    fn resource_module_uses_build_body_with_create_schema_class() {
+        let resource = sample_resource();
+        let output = generate_resource_module(&resource, "test");
+        // sample_resource.crud.create_schema = "CreateBody"
+        assert!(
+            output.contains("build_body(\"CreateBody\""),
+            "create_resource must call build_body with the SDK model class name"
+        );
+    }
+
+    #[test]
+    fn resource_module_uses_snake_case_sdk_method() {
+        // Resource crud schemas:    "CreateBody" / "UpdateBody" / "ReadBody" / "DeleteBody".
+        // Expected python SDK methods: "create_body" / "update_body" / etc.
+        let resource = sample_resource();
+        let output = generate_resource_module(&resource, "test");
+        assert!(output.contains("call_api(module, client, \"create_body\""));
+        assert!(output.contains("call_api(module, client, \"read_body\""));
+        assert!(output.contains("call_api(module, client, \"delete_body\""));
+    }
+
+    #[test]
+    fn resource_without_update_endpoint_fails_with_unsupported_message() {
+        let mut resource = sample_resource();
+        resource.crud.update_endpoint = None;
+        resource.crud.update_schema = None;
+        let output = generate_resource_module(&resource, "test");
+        assert!(
+            output.contains("update not supported, delete+recreate"),
+            "resources without update_endpoint should emit an unsupported-update fail_json"
+        );
+    }
+
+    #[test]
+    fn resource_module_read_mapping_passes_through_to_ir() {
+        // The read_mapping field is plumbed via the IR but the Phase 1 generator
+        // does not yet render an honest diff from it; this test pins the
+        // generator to remain a function of the IR (not erroring on a populated
+        // read_mapping).
+        let mut resource = sample_resource();
+        resource.read_mapping.insert("item_name".into(), "name".into());
+        let output = generate_resource_module(&resource, "test");
+        assert!(output.contains("# TODO(phase-1b): use read_mapping for honest diff"));
+    }
+
+    #[test]
+    fn python_sdk_method_name_matches_known_targets() {
+        assert_eq!(python_sdk_method_name("createRole"), "create_role");
+        assert_eq!(python_sdk_method_name("getRole"), "get_role");
+        assert_eq!(python_sdk_method_name("deleteItem"), "delete_item");
+        assert_eq!(
+            python_sdk_method_name("CreatePKICertIssuer"),
+            "create_pki_cert_issuer"
+        );
+        assert_eq!(
+            python_sdk_method_name("gatewayCreateK8SAuthConfig"),
+            "gateway_create_k8_s_auth_config"
+        );
+    }
+
+    #[test]
+    fn python_sdk_model_class_name_matches_known_targets() {
+        assert_eq!(python_sdk_model_class_name("createRole"), "CreateRole");
+        assert_eq!(
+            python_sdk_model_class_name("CreatePKICertIssuer"),
+            "CreatePKICertIssuer"
+        );
+        assert_eq!(
+            python_sdk_model_class_name("authMethodCreateApiKey"),
+            "AuthMethodCreateApiKey"
+        );
+    }
+
+    // ── Action module generation ────────────────────────────────────
+
+    fn sample_action() -> IacAction {
+        IacAction {
+            name: "test_uid_generate_token".to_string(),
+            description: "Generate a UID token".to_string(),
+            category: "uid".to_string(),
+            endpoint: "/uid-generate-token".to_string(),
+            schema: "uidGenerateToken".to_string(),
+            response_schema: Some("uidGenerateTokenOutput".to_string()),
+            mutating: true,
+            sensitive_response_fields: vec!["token".to_string()],
+            attributes: vec![
+                TestAttributeBuilder::new("auth-method-name", IacType::String)
+                    .required()
+                    .description("Auth method name")
+                    .build(),
+                TestAttributeBuilder::new("uid-token", IacType::String)
+                    .description("UID token to authenticate with")
+                    .build(),
+            ],
+            sdk_method: None,
+        }
+    }
+
+    #[test]
+    fn action_module_carries_no_state_parameter() {
+        let action = sample_action();
+        let out = generate_action_module(&action, "test");
+        // Action modules do not have create/read/update/delete semantics.
+        assert!(!out.contains("'state':"), "action modules must not declare state");
+        assert!(!out.contains("def create_resource"));
+        assert!(!out.contains("def delete_resource"));
+    }
+
+    #[test]
+    fn action_module_disables_check_mode() {
+        let action = sample_action();
+        let out = generate_action_module(&action, "test");
+        assert!(out.contains("supports_check_mode=False"));
+    }
+
+    #[test]
+    fn action_module_calls_expected_sdk_method() {
+        let action = sample_action();
+        let out = generate_action_module(&action, "test");
+        assert!(out.contains("call_api(module, client, \"uid_generate_token\", body)"));
+        assert!(out.contains("build_body(\"UidGenerateToken\""));
+    }
+
+    #[test]
+    fn action_module_masks_sensitive_response_fields() {
+        let action = sample_action();
+        let out = generate_action_module(&action, "test");
+        assert!(out.contains("_sensitive = {'token'}"), "expected token in sensitive set, got:\n{out}");
+        assert!(out.contains("'***' if k in _sensitive else v"));
+    }
+
+    #[test]
+    fn action_module_empty_sensitive_set_renders_set_literal() {
+        let mut action = sample_action();
+        action.sensitive_response_fields.clear();
+        let out = generate_action_module(&action, "test");
+        assert!(out.contains("_sensitive = set()"));
+    }
+
+    #[test]
+    fn action_module_mutating_false_emits_changed_false() {
+        let mut action = sample_action();
+        action.mutating = false;
+        let out = generate_action_module(&action, "test");
+        assert!(out.contains("module.exit_json(changed=False, result=masked)"));
+    }
+
+    #[test]
+    fn action_module_mutating_true_emits_changed_true() {
+        let action = sample_action();
+        let out = generate_action_module(&action, "test");
+        assert!(out.contains("module.exit_json(changed=True, result=masked)"));
+    }
+
+    #[test]
+    fn action_module_strips_provider_prefix_from_name() {
+        let mut action = sample_action();
+        action.name = "akeyless_uid_generate_token".to_string();
+        let out = generate_action_module(&action, "akeyless");
+        assert!(out.contains("module: uid_generate_token"));
+    }
+
+    #[test]
+    fn action_module_required_attribute_renders_in_argument_spec() {
+        let action = sample_action();
+        let out = generate_action_module(&action, "test");
+        assert!(out.contains("'auth_method_name': {'type': 'str', 'required': True}"));
+    }
+
+    #[test]
+    fn python_set_literal_empty_returns_set_call() {
+        assert_eq!(python_set_literal(&[]), "set()");
+    }
+
+    #[test]
+    fn python_set_literal_single_item() {
+        assert_eq!(python_set_literal(&["token".into()]), "{'token'}");
+    }
+
+    #[test]
+    fn python_set_literal_multiple_items_preserves_order() {
+        assert_eq!(
+            python_set_literal(&["ciphertext".into(), "result".into()]),
+            "{'ciphertext', 'result'}"
+        );
+    }
+
+    #[test]
+    fn action_module_uses_sdk_method_override_when_provided() {
+        let mut action = sample_action();
+        // Batch endpoints reuse the BatchEncryptionRequestLine schema but
+        // the actual SDK method is encrypt_batch / decrypt_batch.
+        action.schema = "BatchEncryptionRequestLine".to_string();
+        action.sdk_method = Some("encrypt_batch".to_string());
+        let out = generate_action_module(&action, "test");
+        assert!(out.contains("call_api(module, client, \"encrypt_batch\", body)"));
+        // Model class is still derived from schema (the body type is correct).
+        assert!(out.contains("build_body(\"BatchEncryptionRequestLine\""));
+    }
+
+    #[test]
+    fn action_module_falls_back_to_derived_method_when_override_absent() {
+        let action = sample_action();
+        let out = generate_action_module(&action, "test");
+        // sample_action.sdk_method is None → method derives from schema.
+        assert!(out.contains("call_api(module, client, \"uid_generate_token\", body)"));
     }
 }
