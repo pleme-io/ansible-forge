@@ -3,11 +3,36 @@
 //! Generates Python module files and integration test playbooks.
 
 use iac_forge::{
-    ArtifactKind, Backend, GeneratedArtifact, IacDataSource, IacForgeError, IacProvider,
+    ArtifactKind, Backend, GeneratedArtifact, IacAction, IacDataSource, IacForgeError, IacProvider,
     IacResource, NamingConvention, strip_provider_prefix, to_snake_case,
 };
 
 use crate::module_gen;
+
+/// Static `galaxy.yml` collection manifest.
+const GALAXY_YML: &str = "namespace: akeyless\n\
+name: akeyless\n\
+version: 0.1.0\n\
+readme: README.md\n\
+authors: [pleme-io]\n\
+description: \"Auto-generated Ansible modules for Akeyless Vault — managed by iac-forge.\"\n\
+license: [MIT]\n\
+dependencies: {}\n\
+tags: [security, secrets, akeyless]\n";
+
+/// Static `meta/runtime.yml` requiring a recent Ansible.
+const RUNTIME_YML: &str = "requires_ansible: '>=2.14.0'\n";
+
+/// Static `requirements.txt` listing the Akeyless Python SDK.
+const REQUIREMENTS_TXT: &str = "akeyless>=5.0.22\n";
+
+/// Static `README.md` stub.
+const README_MD: &str = "# ansible-akeyless\n\n\
+Auto-generated Ansible collection wrapping the Akeyless Python SDK.\n\
+Each module proxies one Akeyless V2 API endpoint with create/read/update/delete\n\
+semantics derived from the upstream OpenAPI specification.\n\
+Do not edit generated modules — they will be overwritten.\n\n\
+Regenerate with: `iac-forge-cli generate --backend ansible`.\n";
 
 /// Ansible backend for `iac-forge`.
 ///
@@ -72,11 +97,11 @@ impl Backend for AnsibleBackend {
         let content = module_gen::generate_resource_module(resource, &provider.name);
         let path = format!("plugins/modules/{}.py", to_snake_case(module_name));
 
-        Ok(vec![GeneratedArtifact {
+        Ok(vec![GeneratedArtifact::new(
             path,
             content,
-            kind: ArtifactKind::Resource,
-        }])
+            ArtifactKind::Resource,
+        )])
     }
 
     fn generate_data_source(
@@ -88,11 +113,11 @@ impl Backend for AnsibleBackend {
         let content = module_gen::generate_data_source_module(ds, &provider.name);
         let path = format!("plugins/modules/{}_info.py", to_snake_case(module_name));
 
-        Ok(vec![GeneratedArtifact {
+        Ok(vec![GeneratedArtifact::new(
             path,
             content,
-            kind: ArtifactKind::DataSource,
-        }])
+            ArtifactKind::DataSource,
+        )])
     }
 
     fn generate_provider(
@@ -101,8 +126,20 @@ impl Backend for AnsibleBackend {
         _resources: &[IacResource],
         _data_sources: &[IacDataSource],
     ) -> Result<Vec<GeneratedArtifact>, IacForgeError> {
-        // Ansible doesn't have a provider concept — no-op.
-        Ok(vec![])
+        // Collection-level files: bundled Python helper, galaxy metadata,
+        // runtime manifest, requirements, and a stub README. These are
+        // provider-scoped (one per generation), so this is the idiomatic hook.
+        Ok(vec![
+            GeneratedArtifact::new(
+                "plugins/module_utils/akeyless_client.py",
+                crate::client_helper::AKEYLESS_CLIENT_PY,
+                ArtifactKind::Metadata,
+            ),
+            GeneratedArtifact::new("galaxy.yml", GALAXY_YML, ArtifactKind::Metadata),
+            GeneratedArtifact::new("meta/runtime.yml", RUNTIME_YML, ArtifactKind::Metadata),
+            GeneratedArtifact::new("requirements.txt", REQUIREMENTS_TXT, ArtifactKind::Metadata),
+            GeneratedArtifact::new("README.md", README_MD, ArtifactKind::Metadata),
+        ])
     }
 
     fn generate_test(
@@ -117,11 +154,27 @@ impl Backend for AnsibleBackend {
             to_snake_case(module_name)
         );
 
-        Ok(vec![GeneratedArtifact {
+        Ok(vec![GeneratedArtifact::new(
             path,
             content,
-            kind: ArtifactKind::Test,
-        }])
+            ArtifactKind::Test,
+        )])
+    }
+
+    fn generate_action(
+        &self,
+        action: &IacAction,
+        provider: &IacProvider,
+    ) -> Result<Vec<GeneratedArtifact>, IacForgeError> {
+        let module_name = strip_provider_prefix(&action.name, &provider.name);
+        let content = module_gen::generate_action_module(action, &provider.name);
+        let path = format!("plugins/modules/{}.py", to_snake_case(module_name));
+
+        Ok(vec![GeneratedArtifact::new(
+            path,
+            content,
+            ArtifactKind::Module,
+        )])
     }
 
     fn naming(&self) -> &dyn NamingConvention {
@@ -133,7 +186,7 @@ impl Backend for AnsibleBackend {
 mod tests {
     use super::*;
     use iac_forge::{AuthInfo, CrudInfo, IacType, IdentityInfo, TestAttributeBuilder};
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     fn sample_provider() -> IacProvider {
         IacProvider {
@@ -142,7 +195,7 @@ mod tests {
             version: "0.1.0".to_string(),
             auth: AuthInfo::default(),
             skip_fields: vec![],
-            platform_config: HashMap::new(),
+            platform_config: BTreeMap::new(),
         }
     }
 
@@ -177,6 +230,7 @@ mod tests {
                 import_field: "instance_name".to_string(),
                 force_replace_fields: vec![],
             },
+        read_mapping: std::collections::BTreeMap::new(),
         }
     }
 
@@ -209,6 +263,7 @@ mod tests {
             read_schema: "ReadInstance".to_string(),
             read_response_schema: None,
             attributes: vec![],
+            read_mapping: std::collections::BTreeMap::new(),
         };
         let artifacts = backend.generate_data_source(&ds, &provider).unwrap();
         assert_eq!(artifacts.len(), 1);
@@ -217,13 +272,18 @@ mod tests {
     }
 
     #[test]
-    fn generate_provider_is_noop() {
+    fn generate_provider_emits_collection_metadata() {
         let backend = AnsibleBackend::new();
         let provider = sample_provider();
-        let artifacts = backend
-            .generate_provider(&provider, &[], &[])
-            .unwrap();
-        assert!(artifacts.is_empty());
+        let artifacts = backend.generate_provider(&provider, &[], &[]).unwrap();
+        // Collection-level files: client helper, galaxy.yml, runtime, requirements, README.
+        assert_eq!(artifacts.len(), 5);
+        let paths: Vec<&str> = artifacts.iter().map(|a| a.path.as_str()).collect();
+        assert!(paths.contains(&"plugins/module_utils/akeyless_client.py"));
+        assert!(paths.contains(&"galaxy.yml"));
+        assert!(paths.contains(&"meta/runtime.yml"));
+        assert!(paths.contains(&"requirements.txt"));
+        assert!(paths.contains(&"README.md"));
     }
 
     #[test]
@@ -387,6 +447,7 @@ mod tests {
             read_schema: "ReadVolume".to_string(),
             read_response_schema: None,
             attributes: vec![],
+            read_mapping: std::collections::BTreeMap::new(),
         };
         let artifacts = backend.generate_data_source(&ds, &provider).unwrap();
         assert_eq!(artifacts[0].path, "plugins/modules/volume_info.py");
@@ -463,6 +524,7 @@ mod tests {
             read_schema: "ReadSecret".to_string(),
             read_response_schema: None,
             attributes: vec![],
+            read_mapping: std::collections::BTreeMap::new(),
         };
         let artifacts = backend.generate_data_source(&ds, &provider).unwrap();
         let content = &artifacts[0].content;
@@ -499,5 +561,48 @@ mod tests {
         resource.name = "mycloud_my-resource".to_string();
         let artifacts = backend.generate_resource(&resource, &provider).unwrap();
         assert_eq!(artifacts[0].path, "plugins/modules/my_resource.py");
+    }
+
+    fn sample_action() -> iac_forge::IacAction {
+        iac_forge::IacAction {
+            name: "mycloud_uid_generate_token".to_string(),
+            description: "Generate a UID token".to_string(),
+            category: "uid".to_string(),
+            endpoint: "/uid-generate-token".to_string(),
+            schema: "uidGenerateToken".to_string(),
+            response_schema: Some("uidGenerateTokenOutput".to_string()),
+            mutating: true,
+            sensitive_response_fields: vec!["token".to_string()],
+            attributes: vec![
+                TestAttributeBuilder::new("auth-method-name", IacType::String)
+                    .required()
+                    .description("Auth method name")
+                    .build(),
+            ],
+            sdk_method: None,
+        }
+    }
+
+    #[test]
+    fn generate_action_writes_to_plugins_modules_path() {
+        let backend = AnsibleBackend::new();
+        let provider = sample_provider();
+        let action = sample_action();
+        let artifacts = backend.generate_action(&action, &provider).unwrap();
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].path, "plugins/modules/uid_generate_token.py");
+        assert_eq!(artifacts[0].kind, ArtifactKind::Module);
+    }
+
+    #[test]
+    fn generate_action_content_has_run_action_helper() {
+        let backend = AnsibleBackend::new();
+        let provider = sample_provider();
+        let action = sample_action();
+        let artifacts = backend.generate_action(&action, &provider).unwrap();
+        let content = &artifacts[0].content;
+        assert!(content.contains("def run_action"));
+        assert!(content.contains("call_api(module, client, \"uid_generate_token\", body)"));
+        assert!(content.contains("supports_check_mode=False"));
     }
 }

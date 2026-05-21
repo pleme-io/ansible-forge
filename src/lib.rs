@@ -6,6 +6,7 @@
 //! function.  Data sources produce `_info`-suffixed modules.
 
 pub mod backend;
+pub mod client_helper;
 pub mod module_gen;
 
 pub use backend::AnsibleBackend;
