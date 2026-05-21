@@ -7,10 +7,12 @@ name = "ansible-forge"
 version = "0.1.0"
 dependencies = [
  "iac-forge",
+ "openapi-forge",
  "pretty_assertions",
  "serde",
  "serde_json",
  "tempfile",
+ "toml",
 ]
 
 [[package]]
