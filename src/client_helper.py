@@ -332,7 +332,11 @@ def _lookup(current, key):
     return None
 
 
-def compute_diff(current, params, ignore=None):
+def compute_diff(
+    current: Optional[Dict[str, Any]],
+    params: Optional[Dict[str, Any]],
+    ignore: Optional[FrozenSet[str]] = None,
+) -> List[Tuple[str, Any, Any]]:
     """Drift detection for idempotent update: return [(key, before, after)]
     for each `params` field whose non-None value disagrees with what's
     in the SDK Get response.
@@ -364,7 +368,9 @@ def compute_diff(current, params, ignore=None):
     return drift
 
 
-def drift_to_diff(drift):
+def drift_to_diff(
+    drift: List[Tuple[str, Any, Any]],
+) -> Dict[str, Dict[str, Any]]:
     """Convert the (key, before, after) tuples from compute_diff into
     the {"before": {...}, "after": {...}} shape Ansible's diff mode
     expects in exit_json(diff=...)."""
