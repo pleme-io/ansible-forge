@@ -478,8 +478,20 @@ struct ModuleFragments {
 
 impl ModuleFragments {
     fn from_attributes(attrs: &[IacAttribute]) -> Self {
+        // YAML safety: when there are no module-specific options the
+        // raw build_options_yaml result is empty. The downstream
+        // templates emit `options:\n{options_yaml}\n'''` -- an empty
+        // body parses as `options: null`, which crashes antsibull-docs
+        // with "argument of type 'NoneType' is not iterable". Emit
+        // the explicit `{}` so the YAML always parses to a dict.
+        let raw_options = build_options_yaml(attrs);
+        let options_yaml = if raw_options.trim().is_empty() {
+            "    {}".to_string()
+        } else {
+            raw_options
+        };
         Self {
-            options_yaml: build_options_yaml(attrs),
+            options_yaml,
             return_yaml: build_return_yaml(attrs),
             argument_spec: build_argument_spec(attrs),
         }
@@ -2750,8 +2762,25 @@ mod tests {
 
     #[test]
     fn build_options_yaml_empty_attrs() {
+        // build_options_yaml itself returns empty for no attrs. The
+        // ModuleFragments::from_attributes wrapper substitutes `{}`
+        // for the empty case (see module_fragments_empty_attrs_emits_braces).
         let yaml = build_options_yaml(&[]);
         assert!(yaml.is_empty());
+    }
+
+    #[test]
+    fn module_fragments_empty_attrs_emits_braces_for_options() {
+        // Regression test for the docs-lint failure: emitting
+        // `options:` followed by nothing made the YAML parse as
+        // `options: null`, which crashed antsibull-docs. The wrapper
+        // must inject `    {}` so the YAML parses to an empty dict.
+        let fragments = ModuleFragments::from_attributes(&[]);
+        assert_eq!(
+            fragments.options_yaml.trim(),
+            "{}",
+            "empty options must render as `{{}}` (not blank)"
+        );
     }
 
     #[test]
