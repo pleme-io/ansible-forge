@@ -161,6 +161,30 @@ fn is_input_attr(attr: &IacAttribute) -> bool {
     !attr.computed || attr.required
 }
 
+/// Sanitize a description string for embedding inside a YAML double-
+/// quoted scalar. Production-grade: upstream OpenAPI specs commonly
+/// carry malformed `\"...\"` escapes (legacy of being source-edited
+/// as JSON), and naive `.replace('"', "'")` leaves the backslashes
+/// in place to produce `\'...\'` -- which is invalid YAML inside a
+/// double-quoted scalar. This helper:
+///   1. Replaces all `\"` sequences with plain `"` (strip the escape).
+///   2. Replaces all `\'` sequences with plain `'` (defensive).
+///   3. Substitutes the remaining `"` with `'` so the enclosing
+///      double-quote pair stays balanced.
+///   4. Collapses any tabs to spaces (YAML pre-1.2 didn't allow tabs
+///      in flow-style scalars; some specs include them in long
+///      descriptions).
+///
+/// Backslash characters inside the description (e.g. Windows paths in
+/// docs) are left alone -- only the specific stray-escape patterns
+/// from OpenAPI source are normalized.
+fn escape_yaml_double_quoted_description(desc: &str) -> String {
+    desc.replace("\\\"", "\"")
+        .replace("\\'", "'")
+        .replace('"', "'")
+        .replace('\t', " ")
+}
+
 /// Build a YAML `options:` block from attributes.
 fn build_options_yaml(attrs: &[IacAttribute]) -> String {
     let mut lines = Vec::new();
@@ -171,7 +195,7 @@ fn build_options_yaml(attrs: &[IacAttribute]) -> String {
         lines.push(format!("    {}:", attr.canonical_name));
         lines.push(format!(
             "      description: \"{}\"",
-            attr.description.replace('"', "'")
+            escape_yaml_double_quoted_description(&attr.description)
         ));
         lines.push(format!("      type: {}", attr.iac_type.ansible_type()));
         if attr.required {
@@ -198,7 +222,7 @@ fn build_return_yaml(attrs: &[IacAttribute]) -> String {
         .flat_map(|attr| {
             [
                 format!("{}:", attr.canonical_name),
-                format!("  description: \"{}\"", attr.description.replace('"', "'")),
+                format!("  description: \"{}\"", escape_yaml_double_quoted_description(&attr.description)),
                 format!("  type: {}", attr.iac_type.ansible_type()),
                 "  returned: success".to_string(),
             ]
