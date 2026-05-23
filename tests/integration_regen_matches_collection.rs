@@ -272,6 +272,31 @@ fn integration_regen_matches_current_collection() {
 
     let mod_dir = collection.join("plugins").join("modules");
 
+    // Helper-file sanity: the generator bundles a static
+    // plugins/module_utils/akeyless_client.py via include_str! against
+    // src/client_helper.py. Drift between that bundled copy and the
+    // live collection's helper file is a prime-directive violation --
+    // next regen would overwrite the deployed helper. Catch byte-exact
+    // mismatches here before checking per-module artifacts so the
+    // failure message points at the right file.
+    let bundled_helper = ansible_forge::client_helper::AKEYLESS_CLIENT_PY;
+    let collection_helper_path =
+        collection.join("plugins").join("module_utils").join("akeyless_client.py");
+    let helper_drift_hint = match fs::read_to_string(&collection_helper_path) {
+        Ok(live) if live == bundled_helper => None,
+        Ok(live) => {
+            let summary = format!(
+                "plugins/module_utils/akeyless_client.py: live={} bytes vs bundled={} bytes",
+                live.len(),
+                bundled_helper.len(),
+            );
+            Some(summary)
+        }
+        Err(e) => Some(format!(
+            "plugins/module_utils/akeyless_client.py: read failed: {e}"
+        )),
+    };
+
     // Apply mode: when REGEN_APPLY=1 is set, rewrite every collection
     // module file with the freshly-generated content. Sync intent;
     // skips the comparison assertions afterward so callers can verify
@@ -409,8 +434,17 @@ fn integration_regen_matches_current_collection() {
     let _ = mod_dir;
 
     if apply_mode {
+        // Also rewrite the helper file from the bundled source.
+        if let Err(e) = fs::write(&collection_helper_path, bundled_helper) {
+            hard_drift.push(format!(
+                "{}: helper apply write failed: {e}",
+                collection_helper_path.display()
+            ));
+        } else {
+            applied += 1;
+        }
         eprintln!(
-            "[regen-apply] applied={applied} (rewrote module files in {})",
+            "[regen-apply] applied={applied} (rewrote module files + helper in {})",
             collection.display()
         );
         if !hard_drift.is_empty() {
@@ -420,6 +454,11 @@ fn integration_regen_matches_current_collection() {
             panic!("{} write/parse error(s) during apply", hard_drift.len());
         }
         return;
+    }
+
+    // Helper drift is a hard fail (prime directive).
+    if let Some(hint) = helper_drift_hint {
+        hard_drift.push(hint);
     }
 
     eprintln!(
