@@ -201,9 +201,19 @@ fn build_options_yaml(attrs: &[IacAttribute]) -> String {
         if attr.required {
             lines.push("      required: true".to_string());
         }
-        if attr.sensitive {
-            lines.push("      no_log: true".to_string());
-        }
+        // Intentionally NOT emitting `no_log: true` here.
+        //
+        // antsibull-docs's ModuleDocSchema (Pydantic, strict mode)
+        // rejects `no_log` as `extra_forbidden` under module DOCUMENTATION
+        // -> options -> <field>. The actual no-log behaviour comes from
+        // the argspec dict that build_argument_spec emits as
+        // `'no_log': True` (Python, on the argument_spec entry). Keeping
+        // the YAML duplicate caused every release to fail docs-lint.
+        //
+        // If antsibull-docs ever relaxes the schema (or if we want to
+        // surface "this field is sensitive" in user-facing docs), the
+        // right move is to push it into the description text, not back
+        // into the YAML key.
         if let Some(elems) = attr.iac_type.ansible_elements() {
             lines.push(format!("      elements: {elems}"));
         }
@@ -1053,9 +1063,19 @@ mod tests {
     fn resource_module_sensitive_no_log() {
         let resource = sample_resource();
         let output = generate_resource_module(&resource, "test", "akeyless", "pleme-io (@pleme-io)");
+        // Argspec entry MUST carry no_log: True (that's what makes
+        // Ansible actually mask the value at runtime).
         assert!(output.contains("'no_log': True"));
+        // DOCUMENTATION YAML must NOT carry `no_log: true` --
+        // antsibull-docs's strict ModuleDocSchema rejects it as an
+        // extra field. The fix lives in build_documentation_options;
+        // this assertion is the regression test.
         let doc_section = &output[output.find("DOCUMENTATION").unwrap()..output.find("EXAMPLES").unwrap()];
-        assert!(doc_section.contains("no_log: true"));
+        assert!(
+            !doc_section.contains("no_log: true"),
+            "DOCUMENTATION YAML must not include `no_log: true` "
+            "(antsibull-docs rejects it). It only belongs in argspec."
+        );
     }
 
     #[test]
@@ -2193,12 +2213,13 @@ mod tests {
         let output = generate_data_source_module(&ds, "test", "akeyless", "pleme-io (@pleme-io)");
         assert!(
             output.contains("'password': {'type': 'str', 'required': True, 'no_log': True}"),
-            "data source sensitive field should have no_log"
+            "data source sensitive field should have no_log in argspec (runtime masking)"
         );
         let doc_section = &output[output.find("DOCUMENTATION").unwrap()..output.find("EXAMPLES").unwrap()];
         assert!(
-            doc_section.contains("no_log: true"),
-            "DOCUMENTATION should list no_log for sensitive data source field"
+            !doc_section.contains("no_log: true"),
+            "DOCUMENTATION YAML must not include no_log (antsibull-docs schema rejects it). "
+            "Masking still happens via the 'no_log': True entry in argspec."
         );
     }
 
@@ -2690,7 +2711,12 @@ mod tests {
     }
 
     #[test]
-    fn build_options_yaml_sensitive_field_has_no_log() {
+    fn build_options_yaml_sensitive_field_omits_no_log() {
+        // Regression test for the docs-lint failure: antsibull-docs's
+        // ModuleDocSchema rejects `no_log` under options.<field> as an
+        // unknown key. build_options_yaml emits ONLY documentation-
+        // legal keys; the actual masking comes from the Python argspec
+        // entry that build_argument_spec emits separately.
         let attrs = vec![IacAttribute {
             api_name: "secret".to_string(),
             canonical_name: "secret".to_string(),
@@ -2700,7 +2726,11 @@ mod tests {
             default_value: None, enum_values: None, read_path: None, update_only: false,
         }];
         let yaml = build_options_yaml(&attrs);
-        assert!(yaml.contains("no_log: true"));
+        assert!(
+            !yaml.contains("no_log: true"),
+            "build_options_yaml must not emit `no_log: true` (docs schema rejects)"
+        );
+        assert!(yaml.contains("description:"), "sanity: yaml was emitted");
     }
 
     #[test]
@@ -3714,11 +3744,16 @@ mod tests {
         let out = generate_resource_module(&resource, "test", "akeyless", "pleme-io (@pleme-io)");
         // sample_resource declares `value` as sensitive.
         assert!(out.contains("'value': {'type': 'str', 'required': True, 'no_log': True}"));
-        // YAML doc section between DOCUMENTATION and EXAMPLES.
+        // YAML doc section must NOT carry the `no_log` key (rejected
+        // by antsibull-docs schema). Masking still happens at runtime
+        // via the argspec entry asserted above.
         let doc_start = out.find("DOCUMENTATION").unwrap();
         let doc_end = out.find("EXAMPLES").unwrap();
         let doc = &out[doc_start..doc_end];
-        assert!(doc.contains("no_log: true"), "YAML docstring missing no_log: true");
+        assert!(
+            !doc.contains("no_log: true"),
+            "DOCUMENTATION YAML must not contain `no_log: true` (docs-lint rejects)"
+        );
     }
 
     /// Action with mutating=true -- the generated module delegates to
