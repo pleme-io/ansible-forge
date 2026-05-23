@@ -9,6 +9,23 @@ use iac_forge::{
 
 use crate::module_gen;
 
+/// Read a string-valued key from `[platforms.ansible]` in the provider's
+/// `platform_config`. Returns the fallback when the key is absent or
+/// the wrong type.
+fn ansible_config_str<'a>(
+    provider: &'a IacProvider,
+    key: &str,
+    fallback: &'a str,
+) -> &'a str {
+    provider
+        .platform_config
+        .get("ansible")
+        .and_then(toml::Value::as_table)
+        .and_then(|t| t.get(key))
+        .and_then(|v| v.as_str())
+        .unwrap_or(fallback)
+}
+
 /// Resolve the Galaxy namespace from provider config, falling back to the
 /// provider name when no override is set.
 ///
@@ -16,13 +33,15 @@ use crate::module_gen;
 /// `platform_config`. This lets `provider.toml` ship Ansible-specific
 /// publication metadata without polluting the IR.
 fn galaxy_namespace(provider: &IacProvider) -> &str {
-    provider
-        .platform_config
-        .get("ansible")
-        .and_then(toml::Value::as_table)
-        .and_then(|t| t.get("galaxy_namespace"))
-        .and_then(|v| v.as_str())
-        .unwrap_or(&provider.name)
+    ansible_config_str(provider, "galaxy_namespace", &provider.name)
+}
+
+/// Resolve the module author string from provider config. Format follows
+/// Ansible convention: `"Author Name (@github-handle)"`. Falls back to
+/// `"<provider-name>"` when unset. Reads
+/// `[platforms.ansible] author = "..."` from `provider.toml`.
+pub fn module_author(provider: &IacProvider) -> &str {
+    ansible_config_str(provider, "author", &provider.name)
 }
 
 /// Build the `galaxy.yml` collection manifest for a `<namespace>/<name>`
@@ -130,7 +149,9 @@ impl Backend for AnsibleBackend {
     ) -> Result<Vec<GeneratedArtifact>, IacForgeError> {
         let module_name = strip_provider_prefix(&resource.name, &provider.name);
         let namespace = galaxy_namespace(provider);
-        let content = module_gen::generate_resource_module(resource, &provider.name, namespace);
+        let author = module_author(provider);
+        let content =
+            module_gen::generate_resource_module(resource, &provider.name, namespace, author);
         let path = format!("plugins/modules/{}.py", to_snake_case(module_name));
 
         Ok(vec![GeneratedArtifact::new(
@@ -147,7 +168,9 @@ impl Backend for AnsibleBackend {
     ) -> Result<Vec<GeneratedArtifact>, IacForgeError> {
         let module_name = strip_provider_prefix(&ds.name, &provider.name);
         let namespace = galaxy_namespace(provider);
-        let content = module_gen::generate_data_source_module(ds, &provider.name, namespace);
+        let author = module_author(provider);
+        let content =
+            module_gen::generate_data_source_module(ds, &provider.name, namespace, author);
         let path = format!("plugins/modules/{}_info.py", to_snake_case(module_name));
 
         Ok(vec![GeneratedArtifact::new(
@@ -215,7 +238,9 @@ impl Backend for AnsibleBackend {
     ) -> Result<Vec<GeneratedArtifact>, IacForgeError> {
         let module_name = strip_provider_prefix(&action.name, &provider.name);
         let namespace = galaxy_namespace(provider);
-        let content = module_gen::generate_action_module(action, &provider.name, namespace);
+        let author = module_author(provider);
+        let content =
+            module_gen::generate_action_module(action, &provider.name, namespace, author);
         let path = format!("plugins/modules/{}.py", to_snake_case(module_name));
 
         Ok(vec![GeneratedArtifact::new(
