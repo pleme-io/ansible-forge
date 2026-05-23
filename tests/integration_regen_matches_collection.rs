@@ -24,10 +24,40 @@ use std::str::FromStr;
 
 use ansible_forge::AnsibleBackend;
 use iac_forge::{
-    Backend, DataSourceSpec, ProviderDefaults, ProviderSpec, ResourceSpec,
-    resolve_action, resolve_data_source, resolve_provider, resolve_resource,
+    Backend, DataSourceSpec, IacAction, IacResource, ProviderDefaults, ProviderSpec,
+    ResourceSpec, resolve_action, resolve_data_source, resolve_provider, resolve_resource,
 };
 use openapi_forge::Spec;
+
+/// Synthesize a stub IacResource from an IacAction. We only need the
+/// `name` field for action_groups membership; the action_groups list
+/// emission in the generator just reads the name. Other fields get
+/// placeholder values that aren't inspected.
+fn action_as_resource(action: &IacAction) -> IacResource {
+    IacResource {
+        name: action.name.clone(),
+        description: action.description.clone(),
+        category: String::new(),
+        crud: iac_forge::CrudInfo {
+            create_endpoint: String::new(),
+            create_schema: String::new(),
+            update_endpoint: None,
+            update_schema: None,
+            read_endpoint: String::new(),
+            read_schema: String::new(),
+            read_response_schema: None,
+            delete_endpoint: String::new(),
+            delete_schema: String::new(),
+        },
+        attributes: Vec::new(),
+        identity: iac_forge::IdentityInfo {
+            id_field: String::new(),
+            import_field: String::new(),
+            force_replace_fields: Vec::new(),
+        },
+        read_mapping: std::collections::BTreeMap::new(),
+    }
+}
 
 const DEFAULT_FIXTURES: &str = "/home/drzzln/code/github/pleme-io/akeyless-terraform-resources";
 const DEFAULT_COLLECTION: &str = "/home/drzzln/code/github/pleme-io/ansible-akeyless";
@@ -297,6 +327,62 @@ fn integration_regen_matches_current_collection() {
         )),
     };
 
+    // meta/runtime.yml sanity: generate_provider emits action_groups.all
+    // from the resolved resource + data-source list + the
+    // [platforms.ansible] action_group_extras entries. Drift here means
+    // the next regen would wipe the hand-maintained list and silently
+    // break `module_defaults: group/<ns>.<name>.all:` for users.
+    //
+    // Pre-compute the IacResource + IacDataSource lists by parsing
+    // every TOML up-front so generate_provider sees the full surface.
+    let mut iac_resources: Vec<iac_forge::IacResource> = Vec::new();
+    let mut iac_data_sources: Vec<iac_forge::IacDataSource> = Vec::new();
+    for path in walk_tomls(&fixtures.join("resources")) {
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        let Ok(spec) = toml::from_str::<ResourceSpec>(&text) else { continue };
+        if spec.is_action() {
+            if let Ok(action) = resolve_action(&spec, &api, &defaults) {
+                // Actions take the resource code path; for action_groups
+                // membership we just need the name, which IacAction
+                // exposes the same way IacResource does. To keep the
+                // provider-method signature stable we synthesise an
+                // IacResource entry from each action.
+                iac_resources.push(action_as_resource(&action));
+            }
+        } else if let Ok(resource) = resolve_resource(&spec, &api, &defaults) {
+            iac_resources.push(resource);
+        }
+    }
+    for path in walk_tomls(&fixtures.join("data_sources")) {
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        let Ok(spec) = toml::from_str::<DataSourceSpec>(&text) else { continue };
+        if let Ok(ds) = resolve_data_source(&spec, &api, &defaults) {
+            iac_data_sources.push(ds);
+        }
+    }
+
+    let runtime_drift_hint = match backend.generate_provider(
+        &iac_provider, &iac_resources, &iac_data_sources,
+    ) {
+        Ok(artifacts) => {
+            let bundled_runtime = artifacts
+                .iter()
+                .find(|a| a.path == "meta/runtime.yml")
+                .map(|a| a.content.clone())
+                .unwrap_or_default();
+            let collection_runtime_path = collection.join("meta").join("runtime.yml");
+            match fs::read_to_string(&collection_runtime_path) {
+                Ok(live) if live == bundled_runtime => None,
+                Ok(live) => Some(format!(
+                    "meta/runtime.yml: live={} bytes vs generated={} bytes",
+                    live.len(), bundled_runtime.len(),
+                )),
+                Err(e) => Some(format!("meta/runtime.yml: read failed: {e}")),
+            }
+        }
+        Err(e) => Some(format!("generate_provider failed: {e}")),
+    };
+
     // Apply mode: when REGEN_APPLY=1 is set, rewrite every collection
     // module file with the freshly-generated content. Sync intent;
     // skips the comparison assertions afterward so callers can verify
@@ -458,6 +544,11 @@ fn integration_regen_matches_current_collection() {
 
     // Helper drift is a hard fail (prime directive).
     if let Some(hint) = helper_drift_hint {
+        hard_drift.push(hint);
+    }
+    // runtime.yml drift is also a hard fail (action_groups loss
+    // silently breaks module_defaults).
+    if let Some(hint) = runtime_drift_hint {
         hard_drift.push(hint);
     }
 

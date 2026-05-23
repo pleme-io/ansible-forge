@@ -70,8 +70,96 @@ fn galaxy_yml(namespace: &str, name: &str) -> String {
     )
 }
 
-/// Static `meta/runtime.yml` requiring a recent Ansible.
-const RUNTIME_YML: &str = "requires_ansible: '>=2.14.0'\n";
+/// Header for the generated `meta/runtime.yml`. The action_groups
+/// list is appended dynamically by `runtime_yml(...)` below from the
+/// resolved resource + data-source + action list, plus any
+/// `[platforms.ansible] action_group_extras = [...]` entries the
+/// provider declares (for hand-maintained action-plugin shadows that
+/// the generator doesn't otherwise know about).
+///
+/// The inline comment block is part of the generated file so the
+/// regen-vs-collection backstop produces a byte-exact match.
+const RUNTIME_YML_HEADER: &str = "\
+---
+requires_ansible: '>=2.14.0'
+
+# Action groups: every module under drzln0.akeyless joins the `all`
+# action group so users can set auth + transport options ONCE via
+# `module_defaults` instead of repeating them on every task.
+#
+# Usage:
+#   - hosts: all
+#     module_defaults:
+#       group/drzln0.akeyless.all:
+#         gateway_url: https://gw.example.com
+#         access_id: \"{{ lookup('env', 'AKEYLESS_ACCESS_ID') }}\"
+#         access_key: \"{{ lookup('env', 'AKEYLESS_ACCESS_KEY') }}\"
+#         access_type: aws_iam
+#     tasks:
+#       - drzln0.akeyless.role:
+#           state: present
+#           name: deployer-role
+#       # No need to repeat gateway_url/access_id/access_key/access_type
+#       # on this task -- the group default supplies them.
+#
+# tests/sanity/test_action_groups_sync.py asserts every plugins/modules
+# entry is in the list (and no stale entries remain) on every CI run.
+
+";
+
+/// Build a `meta/runtime.yml` payload by combining the static header
+/// with an `action_groups.all:` list that mirrors the generated module
+/// surface. Lets downstream users set Akeyless auth ONCE via
+/// `module_defaults: group/<ns>.<name>.all:` instead of repeating
+/// auth on every task.
+///
+/// Inputs:
+///   * `module_names` -- the module-file stems for every generated
+///     resource / data source / action.
+///   * `extras` -- the `[platforms.ansible] action_group_extras` list,
+///     for hand-maintained action-plugin shadows (e.g. secret_to_file)
+///     that don't have a corresponding TOML spec.
+///
+/// Output is deterministically sorted so downstream regen-diff
+/// backstops produce minimal patches.
+fn runtime_yml(module_names: &[String], extras: &[String]) -> String {
+    use std::collections::BTreeSet;
+    let mut all: BTreeSet<&str> = BTreeSet::new();
+    for n in module_names {
+        all.insert(n.as_str());
+    }
+    for n in extras {
+        all.insert(n.as_str());
+    }
+    let mut out = String::from(RUNTIME_YML_HEADER);
+    if all.is_empty() {
+        return out;
+    }
+    out.push_str("action_groups:\n  all:\n");
+    for name in &all {
+        out.push_str("    - ");
+        out.push_str(name);
+        out.push('\n');
+    }
+    out
+}
+
+/// Read the `[platforms.ansible] action_group_extras = [...]` list
+/// from `provider.toml`. Empty when unset.
+fn action_group_extras(provider: &IacProvider) -> Vec<String> {
+    provider
+        .platform_config
+        .get("ansible")
+        .and_then(toml::Value::as_table)
+        .and_then(|t| t.get("action_group_extras"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 /// Static `requirements.txt` listing the Akeyless Python SDK.
 const REQUIREMENTS_TXT: &str = "akeyless>=5.0.22\n";
@@ -183,14 +271,32 @@ impl Backend for AnsibleBackend {
     fn generate_provider(
         &self,
         provider: &IacProvider,
-        _resources: &[IacResource],
-        _data_sources: &[IacDataSource],
+        resources: &[IacResource],
+        data_sources: &[IacDataSource],
     ) -> Result<Vec<GeneratedArtifact>, IacForgeError> {
         // Collection-level files: bundled Python helper, galaxy metadata,
-        // runtime manifest, requirements, and a stub README. These are
-        // provider-scoped (one per generation), so this is the idiomatic hook.
+        // runtime manifest (with action_groups.all so module_defaults
+        // works for the full surface), requirements, and a stub README.
         let namespace = galaxy_namespace(provider);
         let collection_name = provider.name.as_str();
+
+        // Build the module-name list (filename stems) that populates
+        // action_groups.all. Strip the provider prefix so e.g.
+        // `akeyless_role` becomes `role`. Data sources get the _info
+        // suffix Ansible expects.
+        let mut module_names: Vec<String> = Vec::with_capacity(
+            resources.len() + data_sources.len(),
+        );
+        for r in resources {
+            let stripped = strip_provider_prefix(&r.name, &provider.name);
+            module_names.push(to_snake_case(stripped));
+        }
+        for d in data_sources {
+            let stripped = strip_provider_prefix(&d.name, &provider.name);
+            module_names.push(format!("{}_info", to_snake_case(stripped)));
+        }
+        let extras = action_group_extras(provider);
+
         Ok(vec![
             GeneratedArtifact::new(
                 "plugins/module_utils/akeyless_client.py",
@@ -202,7 +308,11 @@ impl Backend for AnsibleBackend {
                 galaxy_yml(namespace, collection_name),
                 ArtifactKind::Metadata,
             ),
-            GeneratedArtifact::new("meta/runtime.yml", RUNTIME_YML, ArtifactKind::Metadata),
+            GeneratedArtifact::new(
+                "meta/runtime.yml",
+                runtime_yml(&module_names, &extras),
+                ArtifactKind::Metadata,
+            ),
             GeneratedArtifact::new("requirements.txt", REQUIREMENTS_TXT, ArtifactKind::Metadata),
             GeneratedArtifact::new(
                 "README.md",
