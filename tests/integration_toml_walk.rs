@@ -97,9 +97,17 @@ fn sanity_check_python(content: &str, label: &str) {
         content.contains("def main():"),
         "{label}: emitted module missing def main():"
     );
+    // The Galaxy namespace is configurable via provider.toml
+    // platform_config (the akeyless fixture uses "drzln0"), so we
+    // match the segment-agnostic prefix rather than hard-coding
+    // "ansible_collections.akeyless".
     assert!(
-        content.contains("from ansible_collections.akeyless"),
-        "{label}: emitted module missing ansible_collections.akeyless import"
+        content.contains("from ansible_collections."),
+        "{label}: emitted module missing `from ansible_collections.<ns>...` import"
+    );
+    assert!(
+        content.contains(".plugins.module_utils.akeyless_client"),
+        "{label}: emitted module not wired to the akeyless_client helper"
     );
     assert!(
         !content.contains("TODO: implement API call"),

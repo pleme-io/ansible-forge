@@ -290,6 +290,11 @@ mod tests {
 
     #[test]
     fn generate_resource_produces_python() {
+        // The generated module no longer constructs AnsibleModule(...)
+        // inline — that responsibility moved into run_standard_crud in
+        // akeyless_client.py. Pin instead that the generated module
+        // dispatches via the shared helper (the strongest signal that
+        // the module is valid Python wired to the helper contract).
         let backend = AnsibleBackend::new();
         let provider = sample_provider();
         let resource = sample_resource();
@@ -297,7 +302,10 @@ mod tests {
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].path, "plugins/modules/instance.py");
         assert_eq!(artifacts[0].kind, ArtifactKind::Resource);
-        assert!(artifacts[0].content.contains("AnsibleModule"));
+        assert!(
+            artifacts[0].content.contains("run_standard_crud("),
+            "generated resource module must dispatch via run_standard_crud"
+        );
     }
 
     #[test]
@@ -644,14 +652,35 @@ mod tests {
 
     #[test]
     fn generate_action_content_has_run_action_helper() {
+        // Old shape: the generated module declared a `def run_action`
+        // wrapper, then called call_api(...) directly and built its own
+        // AnsibleModule(supports_check_mode=False, ...).
+        // New shape: the generated module just delegates to
+        // run_action_module from akeyless_client.py, which owns the
+        // check-mode policy and the call_api invocation. Pin the
+        // delegation and the SDK call tuple wiring.
         let backend = AnsibleBackend::new();
         let provider = sample_provider();
         let action = sample_action();
         let artifacts = backend.generate_action(&action, &provider).unwrap();
         let content = &artifacts[0].content;
-        assert!(content.contains("def run_action"));
-        assert!(content.contains("call_api(module, client, \"uid_generate_token\", body)"));
-        assert!(content.contains("supports_check_mode=False"));
+        assert!(
+            content.contains("run_action_module("),
+            "action module must dispatch via the shared run_action_module helper"
+        );
+        // sample_action.schema = "uidGenerateToken" with no sdk_method
+        // override → derived model class UidGenerateToken / method
+        // uid_generate_token.
+        assert!(
+            content.contains("sdk_call=(\"UidGenerateToken\", \"uid_generate_token\")"),
+            "action module must wire its SDK call via sdk_call=(Model, method) tuple, got:\n{content}"
+        );
+        // The old per-module check-mode opt-out is gone — the helper
+        // owns supports_check_mode=False internally.
+        assert!(
+            !content.contains("supports_check_mode=True"),
+            "actions must not enable check_mode"
+        );
     }
 
     // ── Galaxy namespace resolution ────────────────────────────────────

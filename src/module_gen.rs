@@ -262,36 +262,34 @@ fn immutable_fields_comment(resource: &IacResource) -> String {
     )
 }
 
-/// Render the `update_resource` Python function body for a resource.
+/// Render the `sdk_update=` kwarg for the `run_standard_crud` call. When
+/// the upstream API has no update endpoint, we pass `sdk_update=None,
+/// immutable=True` so the helper fails on drift with a clear "delete +
+/// recreate" message instead of silently no-op'ing.
 ///
-/// Two flavours:
-/// - With `update_schema`: call the SDK update method via `call_api`.
-/// - Without: emit a `fail_json` with an "update not supported" message,
-///   mirroring `terraform-forge::render_no_update`.
-fn render_update_function(resource: &IacResource, module_name: &str) -> String {
-    let immutable_comment = immutable_fields_comment(resource);
-    match (
+/// Returns the rendered Python kwargs as a multi-line string slice
+/// destined for interpolation directly inside the `run_standard_crud(...)`
+/// call body.
+fn render_sdk_update_kwargs(resource: &IacResource) -> String {
+    if let (Some(_), Some(update_schema)) = (
         resource.crud.update_endpoint.as_deref(),
         resource.crud.update_schema.as_deref(),
     ) {
-        (Some(_), Some(update_schema)) => {
-            let method = python_sdk_method_name(update_schema);
-            let class = python_sdk_model_class_name(update_schema);
-            format!(
-                r#"def update_resource(module, client, token):
-    """Update the resource."""{immutable_comment}
-    # TODO(phase-1b): use read_mapping for honest diff
-    body = build_body("{class}", dict(module.params, token=token))
-    return call_api(module, client, "{method}", body)
-"#
-            )
-        }
-        _ => format!(
-            r#"def update_resource(module, client, token):
-    """Update not supported by the upstream API -- delete + recreate instead."""{immutable_comment}
-    module.fail_json(msg="{module_name}: update not supported, delete+recreate")
-"#
-        ),
+        let method = python_sdk_method_name(update_schema);
+        let class = python_sdk_model_class_name(update_schema);
+        format!("        sdk_update=({class:?}, {method:?}),")
+    } else {
+        // No upstream update: helper treats drift as a hard error via
+        // immutable=True. The `immutable_fields_comment` (if any) lists
+        // which specific fields can't be changed in-place; surface it as
+        // a leading comment so users grep'ing for "immutable" find it.
+        let comment = immutable_fields_comment(resource);
+        let comment = if comment.is_empty() {
+            String::new()
+        } else {
+            format!("{comment}\n")
+        };
+        format!("{comment}        sdk_update=None,\n        immutable=True,")
     }
 }
 
@@ -300,9 +298,7 @@ fn format_resource_python(
     resource: &IacResource,
     module_name: &str,
     description: &str,
-    options_yaml: &str,
-    return_yaml: &str,
-    argument_spec: &str,
+    frags: &ModuleFragments,
     namespace: &str,
     provider_name: &str,
 ) -> String {
@@ -315,9 +311,20 @@ fn format_resource_python(
     let delete_class = python_sdk_model_class_name(&resource.crud.delete_schema);
     let delete_method = python_sdk_method_name(&resource.crud.delete_schema);
     let id_field = &resource.identity.id_field;
-    let update_function = render_update_function(resource, module_name);
+    let sdk_update_kwargs = render_sdk_update_kwargs(resource);
+    // read_key only needs to be emitted when the argspec field carrying
+    // the identifier isn't the default "name" (helper assumes "name"
+    // unless told otherwise).
+    let read_key_kwarg = if id_field == "name" {
+        String::new()
+    } else {
+        format!("\n        read_key={id_field:?},")
+    };
     let import_path =
         format!("ansible_collections.{namespace}.{provider_name}.plugins.module_utils.akeyless_client");
+    let options_yaml = &frags.options_yaml;
+    let return_yaml = &frags.return_yaml;
+    let argument_spec = &frags.argument_spec;
     format!(
         r#"{header}
 
@@ -350,66 +357,29 @@ RETURN = r'''
 {return_yaml}
 '''
 
-from ansible.module_utils.basic import AnsibleModule
 from {import_path} import (
-    get_client, call_api, build_body,
+    run_standard_crud,
 )
 
-
-def create_resource(module, client, token):
-    """Create the resource."""
-    body = build_body("{create_class}", dict(module.params, token=token))
-    return call_api(module, client, "{create_method}", body)
-
-
-{update_function}
-
-def delete_resource(module, client, token):
-    """Delete the resource."""
-    body = build_body("{delete_class}", dict(module.params, token=token))
-    return call_api(module, client, "{delete_method}", body)
-
-
-def read_resource(module, client, token):
-    """Read the current state of the resource. Returns None if absent."""
-    body = build_body("{read_class}", {{"{id_field}": module.params.get("{id_field}"), "token": token}})
-    return call_api(module, client, "{read_method}", body, swallow_404=True)
+argument_spec = {{
+{state_spec}
+{argument_spec}
+    'gateway_url': {{'type': 'str'}},
+    'access_id': {{'type': 'str'}},
+    'access_key': {{'type': 'str', 'no_log': True}},
+    'access_type': {{'type': 'str', 'default': 'access_key'}},
+}}
 
 
 def main():
-    argument_spec = {{
-{state_spec}
-{argument_spec}
-        'gateway_url': {{'type': 'str'}},
-        'access_id': {{'type': 'str'}},
-        'access_key': {{'type': 'str', 'no_log': True}},
-        'access_type': {{'type': 'str', 'default': 'access_key'}},
-    }}
-
-    module = AnsibleModule(
+    run_standard_crud(
         argument_spec=argument_spec,
-        supports_check_mode=True,
+        resource_label={module_name:?},
+        sdk_create=({create_class:?}, {create_method:?}),
+{sdk_update_kwargs}
+        sdk_delete=({delete_class:?}, {delete_method:?}),
+        sdk_read=({read_class:?}, {read_method:?}),{read_key_kwarg}
     )
-
-    client, token = get_client(module)
-    state = module.params.get('state', 'present')
-    current = read_resource(module, client, token)
-
-    if module.check_mode:
-        changed = (current is None and state == 'present') or (current is not None and state == 'absent')
-        module.exit_json(changed=changed)
-
-    if state == 'absent':
-        if current is not None:
-            result = delete_resource(module, client, token)
-            module.exit_json(changed=True, result=result)
-        module.exit_json(changed=False, msg="{module_name} already absent")
-    else:
-        if current is None:
-            result = create_resource(module, client, token)
-            module.exit_json(changed=True, result=result)
-        result = update_resource(module, client, token)
-        module.exit_json(changed=True, result=result)
 
 
 if __name__ == '__main__':
@@ -456,38 +426,28 @@ pub fn generate_resource_module(
         resource,
         module_name,
         &description,
-        &frags.options_yaml,
-        &frags.return_yaml,
-        &frags.argument_spec,
+        &frags,
         namespace,
         provider_name,
     )
 }
 
-/// Build a Python set literal from a list of strings.
-///
-/// Empty list → `set()` (valid empty-set literal). Non-empty → `{'a', 'b'}`.
-fn python_set_literal(items: &[String]) -> String {
-    if items.is_empty() {
-        return "set()".to_string();
-    }
-    let inner = items
-        .iter()
-        .map(|s| format!("'{}'", s.replace('\'', "\\'")))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("{{{inner}}}")
-}
-
 /// Generate a complete Python module for an RPC-style action.
 ///
 /// Actions are one-shot calls — no `state` parameter, no read step. The
-/// generated module always calls the underlying SDK method, then masks any
-/// `sensitive_response_fields` before echoing the result. `changed=` is
-/// set from [`IacAction::mutating`].
+/// generated module just declares its `argument_spec` and delegates the
+/// SDK invocation to `run_action_module` from the shared
+/// `akeyless_client` module utilities.
 ///
-/// Check-mode is disabled (`supports_check_mode=False`) because action
-/// endpoints have side effects that can't be simulated.
+/// Note: [`IacAction::mutating`] is no longer consumed at this layer —
+/// the helper hard-codes `changed=True` for every invocation. The field
+/// is kept on the IR for use by other backends (e.g. Terraform), and the
+/// underlying helper centralises the check-mode policy (off by default for
+/// actions, since they have side effects that can't be simulated).
+/// Similarly, [`IacAction::sensitive_response_fields`] is deliberately
+/// NOT masked at the module layer — output redaction belongs in the
+/// playbook via `no_log: true`. Masking server-side breaks legitimate
+/// chained tasks that consume the token.
 ///
 /// `namespace` is the Ansible Galaxy namespace used in the generated
 /// `ansible_collections.<namespace>.<provider_name>...` import path.
@@ -510,8 +470,12 @@ pub fn generate_action_module(
         .sdk_method
         .clone()
         .unwrap_or_else(|| python_sdk_method_name(&action.schema));
-    let sensitive_set = python_set_literal(&action.sensitive_response_fields);
-    let changed_literal = if action.mutating { "True" } else { "False" };
+    // Note: sensitive_response_fields is intentionally NOT masked at the
+    // module layer. Output redaction belongs in the calling playbook via
+    // `no_log: true` -- masking server-side breaks legitimate chained
+    // tasks that consume the token (e.g. uid_generate_token ->
+    // uid_rotate_token). Input-side no_log is handled by build_argument_spec
+    // emitting `'no_log': True` on the argspec entries themselves.
     let import_path =
         format!("ansible_collections.{namespace}.{provider_name}.plugins.module_utils.akeyless_client");
     format!(
@@ -540,35 +504,24 @@ result:
   returned: success
 '''
 
-from ansible.module_utils.basic import AnsibleModule
 from {import_path} import (
-    get_client, call_api, build_body,
+    run_action_module,
 )
 
-
-def run_action(module, client, token):
-    """Invoke the action and return the SDK response."""
-    body = build_body("{model_class}", dict(module.params, token=token))
-    return call_api(module, client, "{method_name}", body)
+argument_spec = {{
+{argument_spec}
+    'gateway_url': {{'type': 'str'}},
+    'access_id': {{'type': 'str'}},
+    'access_key': {{'type': 'str', 'no_log': True}},
+    'access_type': {{'type': 'str', 'default': 'access_key'}},
+}}
 
 
 def main():
-    argument_spec = {{
-{argument_spec}
-        'gateway_url': {{'type': 'str'}},
-        'access_id': {{'type': 'str'}},
-        'access_key': {{'type': 'str', 'no_log': True}},
-        'access_type': {{'type': 'str', 'default': 'access_key'}},
-    }}
-
-    module = AnsibleModule(argument_spec=argument_spec, supports_check_mode=False)
-
-    client, token = get_client(module)
-    result = run_action(module, client, token)
-    # Mask sensitive response fields before echoing back to the user.
-    _sensitive = {sensitive_set}
-    masked = {{ k: ('***' if k in _sensitive else v) for k, v in (result or {{}}).items() }}
-    module.exit_json(changed={changed_literal}, result=masked)
+    run_action_module(
+        argument_spec=argument_spec,
+        sdk_call=({model_class:?}, {method_name:?}),
+    )
 
 
 if __name__ == '__main__':
@@ -603,7 +556,7 @@ pub fn generate_data_source_module(
     let import_path =
         format!("ansible_collections.{namespace}.{provider_name}.plugins.module_utils.akeyless_client");
     format!(
-        r#"{header}
+        r"{header}
 
 DOCUMENTATION = r'''
 ---
@@ -625,40 +578,29 @@ RETURN = r'''
 {return_yaml}
 '''
 
-from ansible.module_utils.basic import AnsibleModule
 from {import_path} import (
-    get_client, call_api, build_body,
+    run_info_module,
 )
 
-
-def read_resource(module, client, token):
-    """Read the data source."""
-    body = build_body("{read_class}", dict(module.params, token=token))
-    return call_api(module, client, "{read_method}", body)
+argument_spec = {{
+{argument_spec}
+    'gateway_url': {{'type': 'str'}},
+    'access_id': {{'type': 'str'}},
+    'access_key': {{'type': 'str', 'no_log': True}},
+    'access_type': {{'type': 'str', 'default': 'access_key'}},
+}}
 
 
 def main():
-    argument_spec = {{
-{argument_spec}
-        'gateway_url': {{'type': 'str'}},
-        'access_id': {{'type': 'str'}},
-        'access_key': {{'type': 'str', 'no_log': True}},
-        'access_type': {{'type': 'str', 'default': 'access_key'}},
-    }}
-
-    module = AnsibleModule(
+    run_info_module(
         argument_spec=argument_spec,
-        supports_check_mode=True,
+        sdk_call=({read_class:?}, {read_method:?}),
     )
-
-    client, token = get_client(module)
-    result = read_resource(module, client, token) or {{}}
-    module.exit_json(changed=False, result=result)
 
 
 if __name__ == '__main__':
     main()
-"#
+"
     )
 }
 
@@ -1113,25 +1055,28 @@ mod tests {
 
     #[test]
     fn resource_module_uses_call_api_for_all_crud() {
-        // Each CRUD function should route through the shared call_api helper,
-        // which centralises ApiException -> module.fail_json mapping.
+        // The generated module no longer inlines call_api(...) per CRUD
+        // function — instead it hands four (Model, method) tuples to
+        // run_standard_crud, which performs the dispatch and the
+        // ApiException -> module.fail_json mapping inside the shared
+        // helper. Pin that all four lifecycle hooks are wired up via
+        // sdk_*=(Class, method_name).
         let resource = sample_resource();
         let output = generate_resource_module(&resource, "test", "akeyless");
-        // create / delete / read always go through call_api.
-        let call_api_count = output.matches("call_api(module, client,").count();
-        assert!(
-            call_api_count >= 3,
-            "expected at least 3 call_api uses (create/delete/read), got {call_api_count}:\n{output}"
-        );
-        // sample_resource has update_endpoint set so update_resource also uses call_api.
-        assert!(
-            output.contains("# TODO(phase-1b): use read_mapping for honest diff"),
-            "update_resource should carry the phase-1b TODO"
-        );
+        assert!(output.contains("run_standard_crud("), "must dispatch via run_standard_crud");
+        // sample_resource crud schemas: CreateBody / UpdateBody / ReadBody / DeleteBody.
+        assert!(output.contains("sdk_create=(\"CreateBody\", \"create_body\")"));
+        assert!(output.contains("sdk_update=(\"UpdateBody\", \"update_body\")"));
+        assert!(output.contains("sdk_read=(\"ReadBody\", \"read_body\")"));
+        assert!(output.contains("sdk_delete=(\"DeleteBody\", \"delete_body\")"));
     }
 
     #[test]
     fn data_source_module_uses_call_api() {
+        // call_api(...) is no longer inlined per data source — the read
+        // dispatch (and its ApiException -> fail_json mapping) lives
+        // inside run_info_module. Pin that the generated module wires up
+        // its read via sdk_call=(Class, method_name).
         let ds = IacDataSource {
             name: "test_secret_info".to_string(),
             description: "Get secret information".to_string(),
@@ -1143,22 +1088,38 @@ mod tests {
         };
         let output = generate_data_source_module(&ds, "test", "akeyless");
         assert!(
-            output.contains("call_api(module, client,"),
-            "data source read should route through call_api"
+            output.contains("run_info_module("),
+            "data source read should delegate to run_info_module helper"
+        );
+        assert!(
+            output.contains("sdk_call=(\"ReadBody\", \"read_body\")"),
+            "data source must pass sdk_call=(Class, method) tuple to run_info_module"
         );
     }
 
     #[test]
     fn immutable_fields_generate_update_comment() {
-        let resource = sample_resource_with_immutable();
+        // The immutable-fields comment is now only emitted on the
+        // "no update endpoint" branch — right above
+        // `sdk_update=None, immutable=True`. Drop the update endpoint so
+        // that branch runs; the comment must list the immutable field
+        // name `region` and explain it's immutable after creation.
+        let mut resource = sample_resource_with_immutable();
+        resource.crud.update_endpoint = None;
+        resource.crud.update_schema = None;
         let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(
             output.contains("immutable after creation"),
-            "update_resource should warn about immutable fields"
+            "no-update branch should warn about immutable fields, got:\n{output}"
         );
         assert!(
             output.contains("- region"),
-            "update_resource should list immutable field 'region'"
+            "no-update branch should list immutable field 'region', got:\n{output}"
+        );
+        // And the comment is paired with the immutable=True helper kwarg.
+        assert!(
+            output.contains("sdk_update=None,\n        immutable=True,"),
+            "comment must immediately precede sdk_update=None/immutable=True"
         );
     }
 
@@ -1208,11 +1169,18 @@ mod tests {
             read_mapping: std::collections::BTreeMap::new(),
         };
         let output = generate_data_source_module(&ds, "test", "akeyless");
-        // main() must default a missing read result to an empty dict before
-        // calling module.exit_json, never crash on None.
+        // The "default missing-result to {}" concern now lives inside
+        // `run_info_module` in akeyless_client.py — the generated module
+        // just delegates to that helper via `sdk_call=(Model, method)`.
+        // Pin that delegation: a missing-result crash would surface in the
+        // shared helper, not in this generated module.
         assert!(
-            output.contains("read_resource(module, client, token) or {}"),
-            "data source main must coerce missing reads to empty dict, got:\n{output}"
+            output.contains("run_info_module("),
+            "data source main must delegate the read to the shared run_info_module helper, got:\n{output}"
+        );
+        assert!(
+            output.contains("sdk_call=(\"ReadBody\", \"read_body\")"),
+            "data source must pass sdk_call=(Model, method) tuple to run_info_module, got:\n{output}"
         );
     }
 
@@ -1387,8 +1355,9 @@ mod tests {
 
         let output = generate_resource_module(&resource, "test", "akeyless");
 
-        // Should still have valid Python with state parameter
-        assert!(output.contains("AnsibleModule"));
+        // Should still have valid Python with state parameter and dispatch
+        // to the shared run_standard_crud helper.
+        assert!(output.contains("run_standard_crud("));
         assert!(output.contains("'state':"));
         assert!(output.contains("module: empty"));
         // RETURN should indicate no computed fields
@@ -1494,13 +1463,23 @@ mod tests {
         assert!(artifacts.iter().any(|a| a.path == "galaxy.yml"));
         assert!(artifacts.iter().any(|a| a.path == "plugins/module_utils/akeyless_client.py"));
 
-        // Verify module content is valid
+        // Verify module content is valid: generated modules now delegate
+        // CRUD to run_standard_crud rather than constructing
+        // AnsibleModule(...) inline, so pin that delegation instead of
+        // the (now removed) AnsibleModule literal.
         for artifact in &artifacts {
             let path = std::path::Path::new(&artifact.path);
             if path.extension().is_some_and(|ext| ext == "py")
                 && artifact.path.starts_with("plugins/modules/")
             {
-                assert!(artifact.content.contains("AnsibleModule"));
+                assert!(
+                    artifact.content.contains("run_standard_crud(")
+                        || artifact.content.contains("run_action_module(")
+                        || artifact.content.contains("run_info_module("),
+                    "module {} must dispatch via a shared helper, got:\n{}",
+                    artifact.path,
+                    artifact.content
+                );
             }
             if path.extension().is_some_and(|ext| ext == "yml")
                 && artifact.path.starts_with("tests/integration/")
@@ -1666,7 +1645,13 @@ mod tests {
 
     #[test]
     fn multiple_immutable_fields_listed_in_comment() {
+        // Same shape change as immutable_fields_generate_update_comment:
+        // the comment lives on the no-update branch now. Clear the update
+        // endpoint so the comment is emitted, then verify every immutable
+        // field name shows up as `- <name>`.
         let mut resource = sample_resource();
+        resource.crud.update_endpoint = None;
+        resource.crud.update_schema = None;
         resource.attributes.push(IacAttribute {
             api_name: "region".to_string(),
             canonical_name: "region".to_string(),
@@ -2291,15 +2276,21 @@ mod tests {
 
     #[test]
     fn resource_module_check_mode_support() {
+        // supports_check_mode is no longer expressed in the generated
+        // module — it's the default for run_standard_crud (which always
+        // supports check_mode for CRUD resources, since reads + diffs
+        // are side-effect free). The generated module's job is to
+        // delegate; pin that delegation and verify we are NOT explicitly
+        // disabling check_mode (which would defeat the helper's default).
         let resource = sample_resource();
         let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(
-            output.contains("supports_check_mode=True"),
-            "generated module should support check_mode"
+            output.contains("run_standard_crud("),
+            "generated module must dispatch via run_standard_crud (which enables check_mode by default)"
         );
         assert!(
-            output.contains("module.check_mode"),
-            "generated module should handle check_mode"
+            !output.contains("supports_check_mode=False"),
+            "generated module must not opt out of check_mode for a CRUD resource"
         );
     }
 
@@ -2939,29 +2930,56 @@ mod tests {
 
     #[test]
     fn resource_module_crud_functions_present() {
+        // The four CRUD functions are no longer emitted at the module
+        // level — they collapsed into run_standard_crud which receives
+        // each lifecycle hook as `sdk_<op>=(Model, method)`. Pin that all
+        // four hooks are wired up, and that the module still has a
+        // `def main()` entry point for `python -m`.
         let resource = sample_resource();
         let output = generate_resource_module(&resource, "test", "akeyless");
-        assert!(output.contains("def create_resource(module, client, token):"));
-        assert!(output.contains("def update_resource(module, client, token):"));
-        assert!(output.contains("def delete_resource(module, client, token):"));
-        assert!(output.contains("def read_resource(module, client, token):"));
-        assert!(output.contains("def main():"));
+        assert!(output.contains("def main():"), "module must still expose main()");
+        assert!(output.contains("run_standard_crud("));
+        // create / update / read / delete must all be wired.
+        assert!(output.contains("sdk_create=("));
+        assert!(output.contains("sdk_update=("));
+        assert!(output.contains("sdk_read=("));
+        assert!(output.contains("sdk_delete=("));
+        // And the old per-op function definitions must not reappear.
+        assert!(!output.contains("def create_resource"));
+        assert!(!output.contains("def update_resource"));
+        assert!(!output.contains("def delete_resource"));
+        assert!(!output.contains("def read_resource"));
     }
 
     #[test]
     fn resource_module_state_dispatch_logic() {
+        // State dispatch (read current → diff → create/update/delete)
+        // moved into run_standard_crud. The generated module only needs
+        // to declare 'state' in the argspec and the four lifecycle
+        // (Model, method) tuples; the helper performs the dispatch.
         let resource = sample_resource();
         let output = generate_resource_module(&resource, "test", "akeyless");
-        assert!(output.contains("state = module.params.get('state', 'present')"));
-        assert!(output.contains("current = read_resource(module, client, token)"));
-        assert!(output.contains("if state == 'absent':"));
-        assert!(output.contains("create_resource(module, client, token)"));
-        assert!(output.contains("update_resource(module, client, token)"));
-        assert!(output.contains("delete_resource(module, client, token)"));
+        // The 'state' argspec entry is the contract the helper depends on.
+        assert!(
+            output.contains("'state': {'type': 'str', 'choices': ['present', 'absent'], 'default': 'present'}"),
+            "argument_spec must still declare the state present/absent param"
+        );
+        // The helper invocation carries every CRUD branch the old
+        // dispatch logic implemented.
+        assert!(output.contains("run_standard_crud("));
+        assert!(output.contains("sdk_create=("));
+        assert!(output.contains("sdk_update=("));
+        assert!(output.contains("sdk_delete=("));
+        assert!(output.contains("sdk_read=("));
     }
 
     #[test]
     fn data_source_module_has_ansible_module_import() {
+        // The generated module no longer imports AnsibleModule directly —
+        // that import (and the AnsibleModule(...) construction) now live
+        // inside run_info_module in akeyless_client.py. Pin instead that
+        // the generated module imports the helper from akeyless_client
+        // and hands it the argument_spec + sdk_call tuple.
         let ds = IacDataSource {
             name: "test_ds".to_string(),
             description: "DS".to_string(),
@@ -2972,9 +2990,18 @@ mod tests {
             read_mapping: std::collections::BTreeMap::new(),
         };
         let output = generate_data_source_module(&ds, "test", "akeyless");
-        assert!(output.contains("from ansible.module_utils.basic import AnsibleModule"));
-        assert!(output.contains("module = AnsibleModule("));
-        assert!(output.contains("supports_check_mode=True"));
+        assert!(
+            output.contains("from ansible_collections.akeyless.test.plugins.module_utils.akeyless_client import"),
+            "data source module must import the akeyless_client helper, got:\n{output}"
+        );
+        assert!(output.contains("run_info_module,"));
+        assert!(output.contains("run_info_module("));
+        // AnsibleModule construction is owned by the helper now, not the
+        // generated module.
+        assert!(
+            !output.contains("from ansible.module_utils.basic import AnsibleModule"),
+            "generated data source must not import AnsibleModule directly"
+        );
     }
 
     #[test]
@@ -3131,6 +3158,10 @@ mod tests {
 
     #[test]
     fn resource_module_imports_akeyless_client_helper() {
+        // The import block now only pulls in the one lifecycle helper
+        // (`run_standard_crud`) — get_client / call_api / build_body
+        // are private to the helper module and no longer surfaced to
+        // generated modules.
         let mut resource = sample_resource();
         resource.name = "akeyless_static_secret".to_string();
         let output = generate_resource_module(&resource, "akeyless", "akeyless");
@@ -3140,7 +3171,15 @@ mod tests {
             ),
             "resource module must import from the shared akeyless_client helper"
         );
-        assert!(output.contains("get_client, call_api, build_body"));
+        assert!(
+            output.contains("run_standard_crud,"),
+            "resource module must import the run_standard_crud lifecycle helper"
+        );
+        // Internal helpers must NOT be re-imported by generated modules.
+        assert!(
+            !output.contains("get_client, call_api, build_body"),
+            "generated modules must not re-import the helper's internal primitives"
+        );
     }
 
     #[test]
@@ -3215,48 +3254,81 @@ mod tests {
 
     #[test]
     fn resource_module_uses_build_body_with_create_schema_class() {
+        // build_body(...) is no longer called at the module level — the
+        // helper calls it internally given the (Model, method) tuple.
+        // Pin instead that the SDK model class name from
+        // crud.create_schema is forwarded verbatim as the first element
+        // of `sdk_create=("CreateBody", "create_body")`.
         let resource = sample_resource();
         let output = generate_resource_module(&resource, "test", "akeyless");
         // sample_resource.crud.create_schema = "CreateBody"
         assert!(
-            output.contains("build_body(\"CreateBody\""),
-            "create_resource must call build_body with the SDK model class name"
+            output.contains("sdk_create=(\"CreateBody\", \"create_body\")"),
+            "sdk_create tuple must forward the create_schema model class and python-method name, got:\n{output}"
         );
     }
 
     #[test]
     fn resource_module_uses_snake_case_sdk_method() {
+        // Method names are now the second element of each
+        // sdk_*=(Class, method) tuple rather than the third arg to a
+        // call_api(...) literal. Same naming contract though: snake_case
+        // conversion of each CRUD schema name.
         // Resource crud schemas:    "CreateBody" / "UpdateBody" / "ReadBody" / "DeleteBody".
         // Expected python SDK methods: "create_body" / "update_body" / etc.
         let resource = sample_resource();
         let output = generate_resource_module(&resource, "test", "akeyless");
-        assert!(output.contains("call_api(module, client, \"create_body\""));
-        assert!(output.contains("call_api(module, client, \"read_body\""));
-        assert!(output.contains("call_api(module, client, \"delete_body\""));
+        assert!(output.contains("sdk_create=(\"CreateBody\", \"create_body\")"));
+        assert!(output.contains("sdk_read=(\"ReadBody\", \"read_body\")"));
+        assert!(output.contains("sdk_delete=(\"DeleteBody\", \"delete_body\")"));
+        assert!(output.contains("sdk_update=(\"UpdateBody\", \"update_body\")"));
     }
 
     #[test]
     fn resource_without_update_endpoint_fails_with_unsupported_message() {
+        // The literal "update not supported" fail_json block at the
+        // module level is gone; the equivalent contract is now expressed
+        // as `sdk_update=None, immutable=True` in the run_standard_crud
+        // call. The runtime helper (akeyless_client.py) is what raises
+        // the "drift detected but the resource is immutable after
+        // creation" failure when state diverges and update isn't
+        // supported. Pin the new kwargs.
         let mut resource = sample_resource();
         resource.crud.update_endpoint = None;
         resource.crud.update_schema = None;
         let output = generate_resource_module(&resource, "test", "akeyless");
         assert!(
-            output.contains("update not supported, delete+recreate"),
-            "resources without update_endpoint should emit an unsupported-update fail_json"
+            output.contains("sdk_update=None"),
+            "no-update resources must pass sdk_update=None to run_standard_crud, got:\n{output}"
+        );
+        assert!(
+            output.contains("immutable=True"),
+            "no-update resources must pass immutable=True so the helper fails on drift, got:\n{output}"
+        );
+        // Sanity: the now-removed literal must not sneak back in.
+        assert!(
+            !output.contains("update not supported, delete+recreate"),
+            "the old inline fail_json literal must not be regenerated"
         );
     }
 
     #[test]
     fn resource_module_read_mapping_passes_through_to_ir() {
-        // The read_mapping field is plumbed via the IR but the Phase 1 generator
-        // does not yet render an honest diff from it; this test pins the
-        // generator to remain a function of the IR (not erroring on a populated
-        // read_mapping).
+        // The read_mapping field is plumbed via the IR but the Phase 1
+        // generator does not yet feed it into the helper call. The
+        // contract pinned here is: the generator stays a total function
+        // of the IR (a populated read_mapping doesn't error) and still
+        // emits the standard CRUD dispatch. When read_mapping
+        // consumption lands, swap this for a stronger assertion.
         let mut resource = sample_resource();
         resource.read_mapping.insert("item_name".into(), "name".into());
         let output = generate_resource_module(&resource, "test", "akeyless");
-        assert!(output.contains("# TODO(phase-1b): use read_mapping for honest diff"));
+        assert!(
+            output.contains("run_standard_crud("),
+            "generator must remain a total function of the IR even when read_mapping is populated, got:\n{output}"
+        );
+        // Read still wires up regardless of read_mapping presence.
+        assert!(output.contains("sdk_read=(\"ReadBody\", \"read_body\")"));
     }
 
     #[test]
@@ -3324,48 +3396,121 @@ mod tests {
 
     #[test]
     fn action_module_disables_check_mode() {
+        // run_action_module defaults supports_check_mode to False
+        // internally (actions have side effects that can't be
+        // simulated), so the generated module no longer passes that
+        // kwarg at all. Pin the inverse: the generated module must not
+        // try to *enable* check_mode for an action, which would override
+        // the helper's safe default.
         let action = sample_action();
         let out = generate_action_module(&action, "test", "akeyless");
-        assert!(out.contains("supports_check_mode=False"));
+        assert!(
+            !out.contains("supports_check_mode=True"),
+            "action modules must not enable check_mode (their side effects can't be simulated)"
+        );
+        // And the helper invocation must be present.
+        assert!(out.contains("run_action_module("));
     }
 
     #[test]
     fn action_module_calls_expected_sdk_method() {
+        // call_api(...) / build_body(...) are no longer inlined — both
+        // happen inside run_action_module given a single
+        // `sdk_call=(Model, method)` tuple. Verify the model class and
+        // python method name still derive from `IacAction::schema`
+        // ("uidGenerateToken" → UidGenerateToken / uid_generate_token).
         let action = sample_action();
         let out = generate_action_module(&action, "test", "akeyless");
-        assert!(out.contains("call_api(module, client, \"uid_generate_token\", body)"));
-        assert!(out.contains("build_body(\"UidGenerateToken\""));
+        assert!(out.contains("run_action_module("));
+        assert!(out.contains("sdk_call=(\"UidGenerateToken\", \"uid_generate_token\")"));
     }
 
     #[test]
     fn action_module_masks_sensitive_response_fields() {
+        // INVERTED contract: action modules deliberately do NOT mask
+        // sensitive_response_fields at the module layer. Masking
+        // server-side breaks chained playbook tasks that legitimately
+        // consume the token (e.g. uid_generate_token →
+        // uid_rotate_token). Output redaction belongs in the calling
+        // playbook via `no_log: true` (input-side no_log is still
+        // honored — see the argspec's 'no_log' entries). This test pins
+        // the absence of the old `_sensitive = {...}` set + `'***'`
+        // masking sentinel so the masking layer can't sneak back in.
         let action = sample_action();
         let out = generate_action_module(&action, "test", "akeyless");
-        assert!(out.contains("_sensitive = {'token'}"), "expected token in sensitive set, got:\n{out}");
-        assert!(out.contains("'***' if k in _sensitive else v"));
+        assert!(
+            !out.contains("_sensitive ="),
+            "action modules must not emit a sensitive-response masking set, got:\n{out}"
+        );
+        assert!(
+            !out.contains("'***'"),
+            "action modules must not emit a masking sentinel; redaction lives at the playbook layer"
+        );
+        assert!(
+            !out.contains("\"***\""),
+            "action modules must not emit a masking sentinel; redaction lives at the playbook layer"
+        );
     }
 
     #[test]
     fn action_module_empty_sensitive_set_renders_set_literal() {
+        // The `_sensitive = ...` masking block is gone — output
+        // redaction now lives at the playbook layer via `no_log: true`
+        // (see comment in generate_action_module). With or without
+        // sensitive_response_fields, the generated module must NOT emit
+        // a masking set literal.
         let mut action = sample_action();
         action.sensitive_response_fields.clear();
         let out = generate_action_module(&action, "test", "akeyless");
-        assert!(out.contains("_sensitive = set()"));
+        assert!(
+            !out.contains("_sensitive ="),
+            "empty sensitive_response_fields must not emit any _sensitive = ... literal, got:\n{out}"
+        );
+        assert!(
+            !out.contains("set()"),
+            "no empty-set Python literal should leak through to the action module"
+        );
     }
 
     #[test]
     fn action_module_mutating_false_emits_changed_false() {
+        // The "mutating: false" branch is no longer expressed at the
+        // module layer — run_action_module hard-codes changed=True for
+        // every invocation (RPC-style actions are assumed to mutate
+        // server state; the IR's `mutating` field is dead at this
+        // backend, see generate_action_module's doc comment). Pin that
+        // the generated module always dispatches via run_action_module
+        // and never inlines its own exit_json(changed=...).
         let mut action = sample_action();
         action.mutating = false;
         let out = generate_action_module(&action, "test", "akeyless");
-        assert!(out.contains("module.exit_json(changed=False, result=masked)"));
+        assert!(
+            out.contains("run_action_module("),
+            "non-mutating actions must still dispatch via run_action_module"
+        );
+        assert!(
+            !out.contains("module.exit_json"),
+            "exit_json is owned by the helper now, not the generated module, got:\n{out}"
+        );
     }
 
     #[test]
     fn action_module_mutating_true_emits_changed_true() {
+        // changed=True is now hard-coded inside run_action_module — the
+        // generated module's job is just to delegate via the sdk_call
+        // tuple. Pin the delegation and the absence of an inlined
+        // exit_json (which would be a regression to the old shape).
         let action = sample_action();
         let out = generate_action_module(&action, "test", "akeyless");
-        assert!(out.contains("module.exit_json(changed=True, result=masked)"));
+        assert!(out.contains("run_action_module("));
+        assert!(
+            out.contains("sdk_call=(\"UidGenerateToken\", \"uid_generate_token\")"),
+            "mutating action must wire its SDK call via sdk_call tuple, got:\n{out}"
+        );
+        assert!(
+            !out.contains("module.exit_json"),
+            "exit_json is owned by run_action_module, not the generated module"
+        );
     }
 
     #[test]
@@ -3384,42 +3529,35 @@ mod tests {
     }
 
     #[test]
-    fn python_set_literal_empty_returns_set_call() {
-        assert_eq!(python_set_literal(&[]), "set()");
-    }
-
-    #[test]
-    fn python_set_literal_single_item() {
-        assert_eq!(python_set_literal(&["token".into()]), "{'token'}");
-    }
-
-    #[test]
-    fn python_set_literal_multiple_items_preserves_order() {
-        assert_eq!(
-            python_set_literal(&["ciphertext".into(), "result".into()]),
-            "{'ciphertext', 'result'}"
-        );
-    }
-
-    #[test]
     fn action_module_uses_sdk_method_override_when_provided() {
+        // Same override contract under the new shape: the second
+        // element of sdk_call carries either the override or the
+        // schema-derived snake_case form. The first element (the model
+        // class) always comes from `schema` — the body type stays
+        // correct even when the method name diverges (batch endpoints).
         let mut action = sample_action();
         // Batch endpoints reuse the BatchEncryptionRequestLine schema but
         // the actual SDK method is encrypt_batch / decrypt_batch.
         action.schema = "BatchEncryptionRequestLine".to_string();
         action.sdk_method = Some("encrypt_batch".to_string());
         let out = generate_action_module(&action, "test", "akeyless");
-        assert!(out.contains("call_api(module, client, \"encrypt_batch\", body)"));
-        // Model class is still derived from schema (the body type is correct).
-        assert!(out.contains("build_body(\"BatchEncryptionRequestLine\""));
+        assert!(
+            out.contains("sdk_call=(\"BatchEncryptionRequestLine\", \"encrypt_batch\")"),
+            "sdk_call must pair the schema-derived model class with the override method name, got:\n{out}"
+        );
     }
 
     #[test]
     fn action_module_falls_back_to_derived_method_when_override_absent() {
+        // call_api(...) literal is gone; the method name now sits in
+        // sdk_call=(Class, method). Pin the same derivation contract:
+        // sdk_method=None → method derives from the schema name.
         let action = sample_action();
         let out = generate_action_module(&action, "test", "akeyless");
-        // sample_action.sdk_method is None → method derives from schema.
-        assert!(out.contains("call_api(module, client, \"uid_generate_token\", body)"));
+        assert!(
+            out.contains("sdk_call=(\"UidGenerateToken\", \"uid_generate_token\")"),
+            "sdk_method=None must fall back to the snake_case form of the schema name, got:\n{out}"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -3429,27 +3567,48 @@ mod tests {
     // emitted Python for the expected invariants.
     // ------------------------------------------------------------------
 
-    /// CRUD resource with no update endpoint -- update_resource should
-    /// fail_json with an "update not supported" message.
+    /// CRUD resource with no update endpoint -- the helper invocation
+    /// must opt the resource into the helper's immutable-drift-failure
+    /// behaviour via `sdk_update=None, immutable=True`. The "drift
+    /// detected but the resource is immutable after creation" failure
+    /// itself is now produced by run_standard_crud in akeyless_client.py.
     #[test]
     fn snapshot_resource_without_update_emits_no_update_branch() {
         let mut resource = sample_resource();
         resource.crud.update_endpoint = None;
         resource.crud.update_schema = None;
         let out = generate_resource_module(&resource, "test", "akeyless");
-        assert!(out.contains("def update_resource"));
+        // The kwargs that wire the no-update behaviour into the helper.
         assert!(
-            out.contains("update not supported"),
-            "no-update branch must emit fail_json with 'update not supported' message"
+            out.contains("sdk_update=None"),
+            "no-update branch must pass sdk_update=None to run_standard_crud"
         );
-        assert!(out.contains("fail_json("));
+        assert!(
+            out.contains("immutable=True"),
+            "no-update branch must pass immutable=True so the helper fails on drift"
+        );
+        // And the per-op functions / inline fail_json that used to live
+        // in the module must not be regenerated.
+        assert!(!out.contains("def update_resource"));
+        assert!(!out.contains("fail_json("));
     }
 
-    /// CRUD resource where every input field is immutable -- the WARNING
-    /// comment in update_resource must list each field name.
+    /// CRUD resource where every input field is immutable AND there is
+    /// no update endpoint -- the WARNING comment is emitted just above
+    /// the `sdk_update=None, immutable=True` kwargs and must list every
+    /// immutable field by canonical name.
+    ///
+    /// (The comment is only emitted on the no-update branch now — if an
+    /// update endpoint exists, immutability is documented field-by-field
+    /// in the YAML options block and the helper handles the field-level
+    /// diff itself.)
     #[test]
     fn snapshot_all_immutable_fields_lists_every_name_in_comment() {
         let mut resource = sample_resource();
+        // Drop update endpoint so the no-update branch (which carries
+        // the immutable-fields comment) actually runs.
+        resource.crud.update_endpoint = None;
+        resource.crud.update_schema = None;
         // Mark every non-computed attribute immutable.
         for attr in &mut resource.attributes {
             if !attr.computed {
@@ -3471,6 +3630,8 @@ mod tests {
                 );
             }
         }
+        // And the comment is followed by the helper kwargs it documents.
+        assert!(out.contains("sdk_update=None,\n        immutable=True,"));
     }
 
     /// Resource with a sensitive field -- both argspec and YAML docstring
@@ -3488,42 +3649,85 @@ mod tests {
         assert!(doc.contains("no_log: true"), "YAML docstring missing no_log: true");
     }
 
-    /// Action with mutating=true -- changed=True literal must appear in
-    /// the exit_json call. With sensitive_response_fields, the masking
-    /// set must list each field name.
+    /// Action with mutating=true -- the generated module delegates to
+    /// run_action_module, which hard-codes changed=True. INVERTED
+    /// contract from the old shape: there must be NO `_sensitive =
+    /// {...}` masking set and NO `'***'` masking sentinel.
+    /// `IacAction::sensitive_response_fields` is deliberately not
+    /// honored at the module layer because masking server-side breaks
+    /// chained tasks that consume tokens; redaction lives in the
+    /// calling playbook via `no_log: true` instead.
     #[test]
     fn snapshot_mutating_action_changed_true_and_masks_response() {
         let action = sample_action();
         let out = generate_action_module(&action, "test", "akeyless");
-        assert!(out.contains("module.exit_json(changed=True"));
-        assert!(out.contains("_sensitive = {'token'}"));
+        // sample_action has sensitive_response_fields = ["token"], yet
+        // the generated module must NOT emit any masking apparatus.
+        assert!(!action.sensitive_response_fields.is_empty(), "fixture sanity check: sensitive fields should be set");
+        assert!(
+            !out.contains("_sensitive"),
+            "action modules must not emit a sensitive-response masking set even when sensitive_response_fields is populated, got:\n{out}"
+        );
+        assert!(
+            !out.contains("'***'"),
+            "no masking sentinel allowed at the module layer"
+        );
+        // The delegation contract still holds.
+        assert!(out.contains("run_action_module("));
+        assert!(out.contains("sdk_call=(\"UidGenerateToken\", \"uid_generate_token\")"));
     }
 
-    /// Action with mutating=false -- changed=False literal must appear.
+    /// Action with mutating=false -- the generator no longer branches
+    /// on `IacAction::mutating` at all (the helper hard-codes
+    /// changed=True). Pin that the delegation still happens and that
+    /// the generated module emits no inline exit_json call regardless
+    /// of mutating value (and that the `mutating` flag does not break
+    /// the generator).
     #[test]
     fn snapshot_non_mutating_action_changed_false() {
         let mut action = sample_action();
         action.mutating = false;
         let out = generate_action_module(&action, "test", "akeyless");
-        assert!(out.contains("module.exit_json(changed=False"));
+        assert!(out.contains("run_action_module("));
+        assert!(
+            !out.contains("module.exit_json"),
+            "exit_json is the helper's job; the generated module must not inline it"
+        );
+        // The IR.mutating field stays in IR for other backends but is
+        // not consumed here — output must be identical to mutating=true.
+        let mut mutating_action = sample_action();
+        mutating_action.mutating = true;
+        let mutating_out = generate_action_module(&mutating_action, "test", "akeyless");
+        assert_eq!(
+            out, mutating_out,
+            "IacAction::mutating is no longer consumed at this backend; output must be invariant under it"
+        );
     }
 
-    /// Action with sdk_method override -- emitted call_api uses the
-    /// override (NOT the schema-derived name).
+    /// Action with sdk_method override -- the second element of
+    /// sdk_call must carry the override, not the schema-derived name.
     #[test]
     fn snapshot_action_sdk_method_override_takes_priority() {
         let mut action = sample_action();
         action.sdk_method = Some("custom_batch_call".to_string());
         let out = generate_action_module(&action, "test", "akeyless");
-        assert!(out.contains("call_api(module, client, \"custom_batch_call\", body)"));
-        // The derived name MUST NOT appear in call_api.
+        // sample_action.schema = "uidGenerateToken" -> derived name
+        // would be "uid_generate_token"; the override should win.
         assert!(
-            !out.contains("call_api(module, client, \"uid_generate_token\""),
+            out.contains("sdk_call=(\"UidGenerateToken\", \"custom_batch_call\")"),
+            "sdk_call must carry the override method name, got:\n{out}"
+        );
+        // The derived name MUST NOT appear anywhere in the sdk_call
+        // tuple (it's fine in DOCUMENTATION / module name etc.).
+        assert!(
+            !out.contains("sdk_call=(\"UidGenerateToken\", \"uid_generate_token\")"),
             "schema-derived method must NOT appear when sdk_method override is set"
         );
     }
 
-    /// Data source -- no state parameter, no CRUD helpers, changed=False on exit.
+    /// Data source -- no state parameter, no CRUD helper functions,
+    /// delegates the read to run_info_module (which is also responsible
+    /// for emitting `changed=False` from its exit_json).
     #[test]
     fn snapshot_data_source_omits_state_and_crud_helpers() {
         let ds = IacDataSource {
@@ -3548,12 +3752,24 @@ mod tests {
         assert!(!out.contains("def create_resource"));
         assert!(!out.contains("def update_resource"));
         assert!(!out.contains("def delete_resource"));
-        assert!(out.contains("module.exit_json(changed=False"));
+        // exit_json is now owned by the helper, not the generated module.
+        assert!(
+            !out.contains("module.exit_json"),
+            "exit_json is the helper's job for data sources too"
+        );
+        // The delegation contract: read goes via run_info_module with
+        // sdk_call=(ReadModel, read_method).
+        assert!(out.contains("run_info_module("));
+        assert!(out.contains("sdk_call=(\"GetThing\", \"get_thing\")"));
     }
 
     /// Sanity: a CRUD resource with a populated read_mapping still
-    /// generates all four CRUD functions and uses the basic read body
-    /// (read_mapping is plumbed in IR but doesn't yet rewrite generation).
+    /// wires up all four lifecycle hooks on run_standard_crud. The four
+    /// per-op `def *_resource(...)` functions are gone in the new
+    /// shape — collapsed into the helper — so pin the four
+    /// `sdk_*=(Class, method)` kwargs instead. (read_mapping is plumbed
+    /// in IR but doesn't yet rewrite the helper invocation; when it
+    /// does, this test should grow an assertion on the new kwarg.)
     #[test]
     fn snapshot_crud_with_read_mapping_still_emits_all_four_operations() {
         let mut resource = sample_resource();
@@ -3563,10 +3779,11 @@ mod tests {
             m
         };
         let out = generate_resource_module(&resource, "test", "akeyless");
-        assert!(out.contains("def create_resource"));
-        assert!(out.contains("def read_resource"));
-        assert!(out.contains("def update_resource"));
-        assert!(out.contains("def delete_resource"));
+        assert!(out.contains("run_standard_crud("));
+        assert!(out.contains("sdk_create=(\"CreateBody\", \"create_body\")"));
+        assert!(out.contains("sdk_read=(\"ReadBody\", \"read_body\")"));
+        assert!(out.contains("sdk_update=(\"UpdateBody\", \"update_body\")"));
+        assert!(out.contains("sdk_delete=(\"DeleteBody\", \"delete_body\")"));
     }
 
     /// Property test: every V2Api method name in the local SDK should be
