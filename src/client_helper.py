@@ -278,6 +278,20 @@ def lifecycle_helper(fn):
 PRIMITIVES = frozenset({"get_client", "call_api", "build_body"})
 
 
+def _did_you_mean(name: str, candidates: "FrozenSet[str] | Set[str] | List[str]",
+                  cutoff: float = 0.6, n: int = 3) -> str:
+    """Build a 'Did you mean: a, b, c' suffix for an error message
+    when `name` isn't in `candidates`. Returns an empty string when no
+    candidates pass the similarity cutoff so the caller can append
+    unconditionally. Uses difflib's standard ratio-based matching."""
+    import difflib
+
+    matches = difflib.get_close_matches(name, candidates, n=n, cutoff=cutoff)
+    if not matches:
+        return ""
+    return f". Did you mean: {', '.join(matches)}?"
+
+
 def _require_sdk(module):
     if not HAS_AKEYLESS:
         module.fail_json(
@@ -357,11 +371,23 @@ def build_body(model_class_name: str, params: Optional[Dict[str, Any]]) -> Any:
     Filters params to those the model accepts AND drops None values.
     Raises ValueError on unknown model names so codegen-side regressions
     (e.g. spec drift, generator emitting a renamed model) surface
-    immediately at the right layer.
+    immediately at the right layer. When the model name doesn't exist
+    on the SDK module, the ValueError message includes a 'Did you
+    mean: <closest matches>?' suffix sourced from difflib to point
+    at the likely-intended PascalCase typo.
     """
     accepted = _model_accepted_kwargs(model_class_name)
     if accepted is None:
-        raise ValueError(f"Unknown Akeyless model: {model_class_name}")
+        # Build the suggestion list from the akeyless module's PascalCase
+        # attributes (its SDK model classes). dir() is cheap on the SDK
+        # module (~340 models); filtering to PascalCase weeds out the
+        # api / exceptions / configuration helpers.
+        candidates = frozenset(
+            n for n in dir(akeyless)
+            if n and n[0].isupper()
+        )
+        suggestion = _did_you_mean(model_class_name, candidates)
+        raise ValueError(f"Unknown Akeyless model: {model_class_name}{suggestion}")
     model_cls = getattr(akeyless, model_class_name)
     filtered = {
         k: v for k, v in (params or {}).items()
@@ -389,12 +415,24 @@ def call_api(
     """
     method = getattr(client, method_name, None)
     if method is None:
-        module.fail_json(msg=f"Akeyless V2Api has no method '{method_name}'")
+        # Build suggestion list from the client's snake_case attribute
+        # surface (the SDK method names). Filters to public snake_case
+        # to skip __init__, api_client, etc.
+        candidates = frozenset(
+            n for n in dir(client)
+            if n and not n.startswith("_")
+            and "_" in n
+            and n.islower()
+        )
+        suggestion = _did_you_mean(method_name, candidates)
+        module.fail_json(
+            msg=f"Akeyless V2Api has no method '{method_name}'{suggestion}"
+        )
     try:
         result = _invoke_sdk_method(method, method_name, body)
     except ApiException as exc:
         status = getattr(exc, "status", None)
-        if swallow_404 and status == 404:
+        if swallow_404 and status == HttpStatus.NOT_FOUND:
             return None
         module.fail_json(
             msg=f"Akeyless API call {method_name} failed: {exc.body or exc.reason}",
