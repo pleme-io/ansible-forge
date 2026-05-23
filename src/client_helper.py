@@ -34,6 +34,38 @@ except ImportError as exc:  # pragma: no cover - exercised by Ansible at runtime
 DEFAULT_GATEWAY_URL = "https://api.akeyless.io"
 DEFAULT_ACCESS_TYPE = "access_key"
 
+# Public API surface of this module -- what `from akeyless_client import *`
+# brings in, and what test_public_api.py pins. Adding a new symbol here
+# is a deliberate API expansion that surfaces in code review; removing
+# one is a breaking change for the 208 generated modules that depend on
+# it. Lower-level _helpers (underscore-prefixed) are intentionally
+# private and not listed.
+__all__ = [
+    # Lifecycle helpers (the @lifecycle_helper-decorated functions)
+    "run_standard_crud",
+    "run_action_module",
+    "run_info_module",
+    # Lower-level primitives
+    "get_client",
+    "call_api",
+    "build_body",
+    # Idempotency helpers (exposed for tests + advanced callers)
+    "compute_diff",
+    "drift_to_diff",
+    "IDEMPOTENCY_IGNORE_KEYS",
+    # Typed value objects
+    "SdkCall",
+    # Decorator + registry sets
+    "lifecycle_helper",
+    "LIFECYCLE_HELPERS",
+    "PRIMITIVES",
+    # Constants
+    "DEFAULT_GATEWAY_URL",
+    "DEFAULT_ACCESS_TYPE",
+    "HAS_AKEYLESS",
+    "AKEYLESS_IMPORT_ERROR",
+]
+
 
 class SdkCall(NamedTuple):
     """Typed (model_class_name, snake_case_method) pair handed to the
@@ -90,7 +122,7 @@ def _require_sdk(module):
         )
 
 
-def get_client(module):
+def get_client(module: Any) -> Tuple[Any, str]:
     """Return (V2Api client, access token) for the module's auth params.
 
     Resolves gateway/credentials from (in priority order):
@@ -155,7 +187,7 @@ def _model_accepted_kwargs(model_class_name):
         return frozenset(getattr(model_cls, "attribute_map", {}).keys())
 
 
-def build_body(model_class_name, params):
+def build_body(model_class_name: str, params: Optional[Dict[str, Any]]) -> Any:
     """Instantiate akeyless.<model_class_name>(**filtered_params).
 
     Filters params to those the model accepts AND drops None values.
@@ -174,7 +206,13 @@ def build_body(model_class_name, params):
     return model_cls(**filtered)
 
 
-def call_api(module, client, method_name, body, swallow_404=False):
+def call_api(
+    module: Any,
+    client: Any,
+    method_name: str,
+    body: Any,
+    swallow_404: bool = False,
+) -> Optional[Dict[str, Any]]:
     """Invoke client.<method_name>(body) and return a dict.
 
     If swallow_404 is true, a 404 ApiException returns None instead of
