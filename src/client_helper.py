@@ -11,16 +11,22 @@
 from __future__ import absolute_import, division, print_function
 __metaclass__ = type
 
+import dataclasses
+import enum
 import functools
 import inspect
 import os
-from typing import Any, Dict, FrozenSet, List, NamedTuple, Optional, Set, Tuple, Union
+from typing import (
+    Any, Callable, Dict, Final, FrozenSet, List, NamedTuple, Optional,
+    Protocol, Set, Tuple, TypeVar, Union, cast,
+)
 
 # Type aliases for the lifecycle helpers. SdkCall is the typed pair;
 # we also accept the legacy plain-tuple form for backward compat.
 SdkCallLike = Union["SdkCall", Tuple[str, str]]
 ArgumentSpec = Dict[str, Dict[str, Any]]
 RequiredIf = Optional[List[Tuple[str, str, List[str]]]]
+F = TypeVar("F", bound=Callable[..., Any])
 
 try:
     import akeyless
@@ -31,8 +37,153 @@ except ImportError as exc:  # pragma: no cover - exercised by Ansible at runtime
     HAS_AKEYLESS = False
     AKEYLESS_IMPORT_ERROR = exc
 
-DEFAULT_GATEWAY_URL = "https://api.akeyless.io"
-DEFAULT_ACCESS_TYPE = "access_key"
+DEFAULT_GATEWAY_URL: Final[str] = "https://api.akeyless.io"
+DEFAULT_ACCESS_TYPE: Final[str] = "access_key"
+
+
+# ---------------------------------------------------------------------------
+# Typed exception hierarchy
+# ---------------------------------------------------------------------------
+#
+# The lifecycle helpers translate every internal error into
+# `module.fail_json(...)` for Ansible playbook reporting, but for
+# advanced callers (the lookup plugin, future custom action plugins,
+# unit tests asserting on diagnostics) we expose a typed exception
+# tree so callers can pattern-match instead of regexing the
+# fail_json message.
+
+
+class AkeylessError(Exception):
+    """Base class for everything this module raises. Carries an
+    optional `status` attribute (HTTP status code from the upstream
+    API, when relevant) and a structured `details` dict that callers
+    can serialize alongside the message for richer diagnostics.
+    """
+
+    def __init__(self, msg: str, *, status: Optional[int] = None,
+                 details: Optional[Dict[str, Any]] = None):
+        super().__init__(msg)
+        self.status: Optional[int] = status
+        self.details: Dict[str, Any] = dict(details or {})
+
+
+class AkeylessConfigError(AkeylessError):
+    """Raised when auth/transport config can't be resolved -- e.g.
+    no access_id supplied and no AKEYLESS_ACCESS_ID env var set.
+    Distinguished from AkeylessApiError because the fix is local
+    (set the env var / argspec) rather than upstream-API."""
+
+
+class AkeylessSdkError(AkeylessError):
+    """Raised when the `akeyless` Python SDK is unusable: not
+    importable, or the requested model/method name isn't defined on
+    the SDK module / V2Api class. Almost always a generator bug
+    (spec drift) -- the error message includes the unknown name so
+    the fix points at the right layer."""
+
+
+class AkeylessAuthError(AkeylessError):
+    """Raised when the upstream auth call rejects our credentials.
+    Carries `status` from the SDK ApiException so playbooks can
+    distinguish a 401 (bad credentials) from a 403 (correct creds
+    but not authorized for the requested operation)."""
+
+
+class AkeylessApiError(AkeylessError):
+    """Raised when a non-auth SDK call fails. Carries `status` and a
+    `method` detail so debugging surfaces which endpoint blew up."""
+
+
+class HttpStatus(enum.IntEnum):
+    """HTTP status codes the helpers branch on. IntEnum so direct
+    integer comparison works (e.g. `if status == HttpStatus.NOT_FOUND`)
+    without needing to remember the raw 404."""
+
+    UNAUTHORIZED = 401
+    FORBIDDEN = 403
+    NOT_FOUND = 404
+
+
+# ---------------------------------------------------------------------------
+# Typed config dataclass + AnsibleModule protocol
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class AkeylessConfig:
+    """Resolved auth + transport config -- the typed result of
+    merging module.params with environment variables. Frozen so it
+    can't drift mid-call. Use `AkeylessConfig.from_params(params)`
+    to build one without an AnsibleModule (handy for the lookup
+    plugin + tests).
+
+    Field precedence per field:
+      1. The corresponding `module.params` value (or `params` dict
+         entry).
+      2. The AKEYLESS_* environment variable.
+      3. The DEFAULT_* constant (gateway_url, access_type only).
+    """
+
+    gateway_url: str
+    access_id: Optional[str]
+    access_key: Optional[str]
+    access_type: str
+    pre_issued_token: Optional[str]
+
+    @classmethod
+    def from_params(cls, params: Optional[Dict[str, Any]]) -> "AkeylessConfig":
+        """Build an AkeylessConfig from a flat params dict (e.g.
+        module.params, or a lookup options dict). Performs env-var
+        fallback per the precedence rules above."""
+        p = params or {}
+        return cls(
+            gateway_url=(p.get("gateway_url")
+                         or os.getenv("AKEYLESS_GATEWAY_URL")
+                         or DEFAULT_GATEWAY_URL),
+            access_id=p.get("access_id") or os.getenv("AKEYLESS_ACCESS_ID"),
+            access_key=p.get("access_key") or os.getenv("AKEYLESS_ACCESS_KEY"),
+            access_type=p.get("access_type") or DEFAULT_ACCESS_TYPE,
+            pre_issued_token=os.getenv("AKEYLESS_TOKEN"),
+        )
+
+
+class AnsibleModuleLike(Protocol):
+    """Structural protocol for the bits of `AnsibleModule` the helper
+    actually uses. Lets type-checkers verify call sites without
+    importing the real `AnsibleModule` class (which has a heavy
+    dependency tree and lives in ansible-core, not in this repo's
+    test environment)."""
+
+    params: Dict[str, Any]
+    check_mode: bool
+
+    def exit_json(self, **kwargs: Any) -> None: ...
+    def fail_json(self, **kwargs: Any) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# Decorators
+# ---------------------------------------------------------------------------
+
+
+def requires_sdk(fn: F) -> F:
+    """Decorator: short-circuit a function if the `akeyless` SDK isn't
+    importable. Raises AkeylessSdkError before the wrapped code can
+    NameError on the SDK module. Use on internal helpers that touch
+    `akeyless.*` symbols; the lifecycle helpers handle this through
+    get_client which calls _require_sdk against the module's
+    fail_json -- this decorator is the exception-raising sibling for
+    callers outside the AnsibleModule contract.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if not HAS_AKEYLESS:
+            raise AkeylessSdkError(
+                f"akeyless SDK not importable: {AKEYLESS_IMPORT_ERROR}. "
+                f"Install with: pip install 'akeyless>=5.0.22'"
+            )
+        return fn(*args, **kwargs)
+    return cast(F, wrapper)
 
 # Public API surface of this module -- what `from akeyless_client import *`
 # brings in, and what test_public_api.py pins. Adding a new symbol here
@@ -55,8 +206,21 @@ __all__ = [
     "IDEMPOTENCY_IGNORE_KEYS",
     # Typed value objects
     "SdkCall",
-    # Decorator + registry sets
+    "AkeylessConfig",
+    "HttpStatus",
+    # Structural protocols (for type-checked call sites)
+    "AnsibleModuleLike",
+    # Typed exception hierarchy (raised by primitives; lifecycle
+    # helpers translate these to module.fail_json automatically)
+    "AkeylessError",
+    "AkeylessConfigError",
+    "AkeylessSdkError",
+    "AkeylessAuthError",
+    "AkeylessApiError",
+    # Decorators
     "lifecycle_helper",
+    "requires_sdk",
+    # Registry sets
     "LIFECYCLE_HELPERS",
     "PRIMITIVES",
     # Constants
@@ -162,8 +326,8 @@ def get_client(module: Any) -> Tuple[Any, str]:
     return client, token
 
 
-@functools.lru_cache(maxsize=None)
-def _model_accepted_kwargs(model_class_name):
+@functools.cache  # 3.9+ shorthand for lru_cache(maxsize=None)
+def _model_accepted_kwargs(model_class_name: str) -> Optional[FrozenSet[str]]:
     """Return the frozenset of kwarg names a given SDK model accepts.
 
     Cached because every CRUD module invokes build_body up to four times
