@@ -272,6 +272,12 @@ fn integration_regen_matches_current_collection() {
 
     let mod_dir = collection.join("plugins").join("modules");
 
+    // Apply mode: when REGEN_APPLY=1 is set, rewrite every collection
+    // module file with the freshly-generated content. Sync intent;
+    // skips the comparison assertions afterward so callers can verify
+    // by re-running the test in default (compare) mode.
+    let apply_mode = std::env::var("REGEN_APPLY").is_ok_and(|v| v == "1");
+
     let resource_paths = walk_tomls(&fixtures.join("resources"));
     let data_source_paths = walk_tomls(&fixtures.join("data_sources"));
 
@@ -279,19 +285,33 @@ fn integration_regen_matches_current_collection() {
     let mut not_in_collection = 0usize;
     let mut hard_drift: Vec<String> = Vec::new();
     let mut soft_drift: Vec<String> = Vec::new();
+    let mut applied = 0usize;
 
-    // Pure helper -- returns (compared++, new++, hard_drift, soft_drift).
+    // Pure helper -- returns (compared++, new++, hard_drift, soft_drift, applied++).
     fn check_artifact(
         artifacts: Vec<iac_forge::backend::GeneratedArtifact>,
         label: &str,
         collection: &Path,
-    ) -> (usize, usize, Vec<String>, Vec<String>) {
+        apply: bool,
+    ) -> (usize, usize, Vec<String>, Vec<String>, usize) {
         let mut compared = 0usize;
         let mut new_in_fixtures = 0usize;
         let mut hard = Vec::new();
         let mut soft = Vec::new();
+        let mut applied = 0usize;
         for art in artifacts {
             let on_disk = collection.join(Path::new(&art.path));
+            if apply {
+                if let Some(parent) = on_disk.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                if let Err(e) = fs::write(&on_disk, &art.content) {
+                    hard.push(format!("{label}: write {} failed: {e}", on_disk.display()));
+                } else {
+                    applied += 1;
+                }
+                continue;
+            }
             if !on_disk.exists() {
                 eprintln!("[new] {} (no collection counterpart yet)", art.path);
                 new_in_fixtures += 1;
@@ -309,7 +329,7 @@ fn integration_regen_matches_current_collection() {
             hard.extend(report.hard);
             soft.extend(report.soft);
         }
-        (compared, new_in_fixtures, hard, soft)
+        (compared, new_in_fixtures, hard, soft, applied)
     }
 
     for path in &resource_paths {
@@ -345,11 +365,12 @@ fn integration_regen_matches_current_collection() {
         };
         match result {
             Ok(artifacts) => {
-                let (c, n, h, s) = check_artifact(artifacts, &label, &collection);
+                let (c, n, h, s, a) = check_artifact(artifacts, &label, &collection, apply_mode);
                 compared += c;
                 not_in_collection += n;
                 hard_drift.extend(h);
                 soft_drift.extend(s);
+                applied += a;
             }
             Err(e) => hard_drift.push(format!("{label}: generate: {e}")),
         }
@@ -372,11 +393,12 @@ fn integration_regen_matches_current_collection() {
         match resolve_data_source(&spec, &api, &defaults) {
             Ok(ds) => match backend.generate_data_source(&ds, &iac_provider) {
                 Ok(artifacts) => {
-                let (c, n, h, s) = check_artifact(artifacts, &label, &collection);
+                let (c, n, h, s, a) = check_artifact(artifacts, &label, &collection, apply_mode);
                 compared += c;
                 not_in_collection += n;
                 hard_drift.extend(h);
                 soft_drift.extend(s);
+                applied += a;
             }
                 Err(e) => hard_drift.push(format!("{label}: generate_ds: {e}")),
             },
@@ -385,6 +407,20 @@ fn integration_regen_matches_current_collection() {
     }
 
     let _ = mod_dir;
+
+    if apply_mode {
+        eprintln!(
+            "[regen-apply] applied={applied} (rewrote module files in {})",
+            collection.display()
+        );
+        if !hard_drift.is_empty() {
+            for d in hard_drift.iter().take(20) {
+                eprintln!("[apply-error] {d}");
+            }
+            panic!("{} write/parse error(s) during apply", hard_drift.len());
+        }
+        return;
+    }
 
     eprintln!(
         "[regen-diff] compared={compared} new-in-fixtures={not_in_collection} \
