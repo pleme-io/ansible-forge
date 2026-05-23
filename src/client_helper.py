@@ -14,7 +14,13 @@ __metaclass__ = type
 import functools
 import inspect
 import os
-from typing import NamedTuple, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, NamedTuple, Optional, Set, Tuple, Union
+
+# Type aliases for the lifecycle helpers. SdkCall is the typed pair;
+# we also accept the legacy plain-tuple form for backward compat.
+SdkCallLike = Union["SdkCall", Tuple[str, str]]
+ArgumentSpec = Dict[str, Dict[str, Any]]
+RequiredIf = Optional[List[Tuple[str, str, List[str]]]]
 
 try:
     import akeyless
@@ -332,17 +338,17 @@ def drift_to_diff(drift):
 
 @lifecycle_helper
 def run_standard_crud(
-    argument_spec,
-    resource_label,
-    sdk_create,
-    sdk_update,
-    sdk_delete,
-    sdk_read,
-    read_key="name",
-    required_if=None,
-    immutable=False,
-    idempotent=False,
-):
+    argument_spec: ArgumentSpec,
+    resource_label: str,
+    sdk_create: SdkCallLike,
+    sdk_update: Optional[SdkCallLike],
+    sdk_delete: SdkCallLike,
+    sdk_read: SdkCallLike,
+    read_key: str = "name",
+    required_if: RequiredIf = None,
+    immutable: bool = False,
+    idempotent: bool = False,
+) -> None:
     """Drive the full create/read/update/delete lifecycle for a
     standard-shape Akeyless resource module. Replaces the ~80 lines of
     boilerplate that used to live in every plugins/modules/*.py.
@@ -478,7 +484,11 @@ def run_standard_crud(
 
 
 @lifecycle_helper
-def run_action_module(argument_spec, sdk_call, supports_check_mode=False):
+def run_action_module(
+    argument_spec: ArgumentSpec,
+    sdk_call: SdkCallLike,
+    supports_check_mode: bool = False,
+) -> None:
     """Drive a one-shot non-CRUD module. Replaces the run_action +
     main() boilerplate that the ~26 action modules (uid_generate_token,
     sign_pkcs1, encrypt, decrypt, generate_ca, …) carried.
@@ -509,7 +519,10 @@ def run_action_module(argument_spec, sdk_call, supports_check_mode=False):
 
 
 @lifecycle_helper
-def run_info_module(argument_spec, sdk_call):
+def run_info_module(
+    argument_spec: ArgumentSpec,
+    sdk_call: SdkCallLike,
+) -> None:
     """Drive a read-only `*_info` module. Replaces the read_resource +
     main() boilerplate that the 25 info modules (role_info, items_info,
     target_info, …) carried.
