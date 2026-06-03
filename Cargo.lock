@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "ansible-forge"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "iac-forge",
  "openapi-forge",
@@ -224,7 +224,7 @@ checksum = "113b30b4cd05f7c06868fdb2854f66a7b9fece9a48425351cd532e810d74024f"
 [[package]]
 name = "meimei"
 version = "0.1.1"
-source = "git+https://github.com/pleme-io/meimei#e3d272ab79dfd2bd2db7cd4e8c6b576564f2c114"
+source = "git+https://github.com/pleme-io/meimei#9274859228fbb723437fc0573041fc034d27a9e9"
 
 [[package]]
 name = "memchr"
@@ -241,7 +241,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "openapi-forge"
 version = "0.1.3"
-source = "git+https://github.com/pleme-io/openapi-forge#49cfb32250aa3ff1aed62c87c422b41daf8ea00e"
+source = "git+https://github.com/pleme-io/openapi-forge#cc22f4a41b8b4be2743edb7bfb9487e7ebfb6aa0"
 dependencies = [
  "indexmap",
  "sekkei",
@@ -318,7 +318,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 [[package]]
 name = "sekkei"
 version = "0.1.1"
-source = "git+https://github.com/pleme-io/sekkei#8593191d5bae57d5dddd8d6be618ed63238fda95"
+source = "git+https://github.com/pleme-io/sekkei#d7e53a772d42594be70c8cbcdce5d75cab8b4ddb"
 dependencies = [
  "serde",
  "serde_json",
@@ -417,7 +417,7 @@ dependencies = [
 [[package]]
 name = "takumi"
 version = "0.1.0"
-source = "git+https://github.com/pleme-io/takumi#b256cf0c6b93c9d0a1c2afed60f7a53471341247"
+source = "git+https://github.com/pleme-io/takumi#754e30c59449bbe259244a978d287978bf01aeb2"
 dependencies = [
  "indexmap",
  "sekkei",
