@@ -95,7 +95,7 @@ rec {
     crates = {
       "ansible-forge" = rec {
         crateName = "ansible-forge";
-        version = "0.1.2";
+        version = "0.1.3";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./.; };
         libName = "ansible_forge";
@@ -174,9 +174,9 @@ rec {
       };
       "bitflags" = rec {
         crateName = "bitflags";
-        version = "2.11.1";
+        version = "2.12.1";
         edition = "2021";
-        sha256 = "1cvqijg3rvwgis20a66vfdxannjsxfy5fgjqkaq3l13gyfcj4lf4";
+        sha256 = "02phhjm7w380zdh8928zf13cfi1bw2qz2ay36ml2jmwmmv8cxmw4";
         authors = [
           "The Rust Project Developers"
         ];
@@ -242,9 +242,9 @@ rec {
       };
       "cc" = rec {
         crateName = "cc";
-        version = "1.2.62";
+        version = "1.2.63";
         edition = "2018";
-        sha256 = "164zsxcy2zzvbbh1qpbrsssz8kmria41j4agih47sal3y1cyip51";
+        sha256 = "0zy2bqc4nvj6bv2cipx4h4bn65wf1zqf1fw1hsh64mmvg1hh2vjm";
         authors = [
           "Alex Crichton <alex@alexcrichton.com>"
         ];
@@ -732,9 +732,9 @@ rec {
       };
       "log" = rec {
         crateName = "log";
-        version = "0.4.30";
+        version = "0.4.31";
         edition = "2021";
-        sha256 = "1rd6sw3gv9hb93464w7x3sip99zf8sjagm662r2ckg14b1lcavk1";
+        sha256 = "0kq2fh6q2bjkrm8m6hj8kb7gxfd7cr7qbcpxd1lc1xq5rns30fqi";
         authors = [
           "The Rust Project Developers"
         ];
@@ -760,16 +760,16 @@ rec {
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/pleme-io/meimei";
-          rev = "a3865aca03012893719fa4d093e20de4065fa58b";
-          sha256 = "0ljspbr1l5fmnfnn5dm0yw1kna9h4bbc4q59vxl7k5zcmp1ql6hr";
+          rev = "e3d272ab79dfd2bd2db7cd4e8c6b576564f2c114";
+          sha256 = "1h6v3z0cpxx0c4si0mq3l3mkzavgvydibalgnr3zfaby0gai4qad";
         };
 
       };
       "memchr" = rec {
         crateName = "memchr";
-        version = "2.8.0";
+        version = "2.8.1";
         edition = "2021";
-        sha256 = "0y9zzxcqxvdqg6wyag7vc3h0blhdn7hkq164bxyx2vph8zs5ijpq";
+        sha256 = "1n448jx01h5z2xknj6x2dhxgr8s8fb717cf6vfqj5lmhkpj7m53b";
         authors = [
           "Andrew Gallant <jamslam@gmail.com>"
           "bluss"
@@ -805,13 +805,13 @@ rec {
       };
       "openapi-forge" = rec {
         crateName = "openapi-forge";
-        version = "0.1.2";
+        version = "0.1.3";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/pleme-io/openapi-forge";
-          rev = "c00f6a31d17f1193153124f28fff67a45506ca30";
-          sha256 = "1d8jpfnjx14i9ksvmmjz7jcp041j27qp8bcxgngxnb1dpax92vin";
+          rev = "49cfb32250aa3ff1aed62c87c422b41daf8ea00e";
+          sha256 = "1swm4ism6ga157kzciraphn9xzf91sj8ghdjsfmb86ydimz65knw";
         };
         libName = "openapi_forge";
         dependencies = [
@@ -1091,8 +1091,8 @@ rec {
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/pleme-io/sekkei";
-          rev = "f9d27e9971bd0be7729a492797efa65711cb6171";
-          sha256 = "0z1ms0bx646hmh0a2plfsiy2k396246ix8rrdrpmhndaf4qbgrm8";
+          rev = "8593191d5bae57d5dddd8d6be618ed63238fda95";
+          sha256 = "0zm0d8blg7fmdfwa03k2c0qym3x769qypi283m58dg5gz81zqhym";
         };
         dependencies = [
           {
@@ -1331,9 +1331,9 @@ rec {
       };
       "shlex" = rec {
         crateName = "shlex";
-        version = "1.3.0";
-        edition = "2015";
-        sha256 = "0r1y6bv26c1scpxvhg2cabimrmwgbp4p3wy6syj9n0c4s3q2znhg";
+        version = "2.0.1";
+        edition = "2018";
+        sha256 = "1fjsll1cd7d2bcpdij9kd6w62rpbc7qqzvydvs021vsmr1cxvypq";
         authors = [
           "comex <comexk@gmail.com>"
           "Fenhl <fenhl@fenhl.net>"
@@ -1387,8 +1387,8 @@ rec {
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/pleme-io/takumi";
-          rev = "234adbbe0e3f75239cba39b7fe033d9d6806b162";
-          sha256 = "1n4428v0zhg0c7c3qlfnih0injcl69g006b29mx0fbs5qmwarslx";
+          rev = "b256cf0c6b93c9d0a1c2afed60f7a53471341247";
+          sha256 = "01yv5mdhp3g55k6f5yqf2gdh5psf45rwb07d22ni83w54n7lqyzc";
         };
         dependencies = [
           {
