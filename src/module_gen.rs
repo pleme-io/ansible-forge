@@ -1085,8 +1085,8 @@ mod tests {
         let doc_section = &output[output.find("DOCUMENTATION").unwrap()..output.find("EXAMPLES").unwrap()];
         assert!(
             !doc_section.contains("no_log: true"),
-            "DOCUMENTATION YAML must not include `no_log: true` "
-            "(antsibull-docs rejects it). It only belongs in argspec."
+            "DOCUMENTATION YAML must not include `no_log: true` \
+             (antsibull-docs rejects it). It only belongs in argspec."
         );
     }
 
@@ -2230,8 +2230,8 @@ mod tests {
         let doc_section = &output[output.find("DOCUMENTATION").unwrap()..output.find("EXAMPLES").unwrap()];
         assert!(
             !doc_section.contains("no_log: true"),
-            "DOCUMENTATION YAML must not include no_log (antsibull-docs schema rejects it). "
-            "Masking still happens via the 'no_log': True entry in argspec."
+            "DOCUMENTATION YAML must not include no_log (antsibull-docs schema rejects it). \
+             Masking still happens via the 'no_log': True entry in argspec."
         );
     }
 
