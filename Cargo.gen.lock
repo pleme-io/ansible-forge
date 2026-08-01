@@ -1,6 +1,9 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "cargo_lock_sha256": "d2a3554b7e1ddcbb14af5b6dce06e6c359a56cd8513a8af49cfdb5ef4764e11f",
+  "manifest_sha256": {
+    "Cargo.toml": "194fc2ffd69ed593d74ec750e9b7afd78c67969e3d523c387bd12f16fc0e5879"
+  },
   "target_resolves": {
     "base": {
       "ansible-forge-0.1.3": {
