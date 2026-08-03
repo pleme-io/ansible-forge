@@ -8,6 +8,22 @@ updates:
     groups:
       cargo-minor-and-patch:
         update-types: [minor, patch]
+    # `iac-forge` is a GIT dependency and Dependabot cannot update one: the
+    # weekly job died on
+    #   proxy | Failed to request additional scope: 403 Forbidden
+    #          "Either the repo doesn't exist, or Dependabot doesn't have
+    #           access to it"
+    # every run, which is why this repo showed red. The repo is public, so
+    # that message is misleading — the scope request is for git-dependency
+    # resolution, not for a private repo.
+    #
+    # Telling Dependabot not to attempt the impossible is the honest fix, and
+    # it is explicitly a MITIGATION, not a solution: the real fix is
+    # publishing iac-forge so it can be named by version, the way
+    # openapi-forge now is. Remove this ignore the day that happens — a
+    # registry dep is Dependabot's home turf.
+    ignore:
+      - dependency-name: iac-forge
 
   - package-ecosystem: github-actions
     directory: /

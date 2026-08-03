@@ -28,7 +28,7 @@ pretty_assertions = "1.4.1"
 tempfile = "3"
 # Direct access to the OpenAPI parser for the end-to-end TOML walk test.
 # iac-forge takes a &openapi_forge::Spec but doesn't re-export it.
-openapi-forge = { git = "https://github.com/pleme-io/openapi-forge" }
+openapi-forge = "0.1"
 
 [profile.release]
 codegen-units = 1
