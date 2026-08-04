@@ -9,7 +9,7 @@ repository = "https://github.com/pleme-io/ansible-forge"
 documentation = "https://docs.rs/ansible-forge"
 readme = "README.md"
 license = "MIT"
-categories = ["development-tools", "code-generators"]
+categories = ["development-tools"]
 keywords = ["ansible", "codegen", "iac", "module"]
 
 [lints.clippy]
