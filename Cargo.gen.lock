@@ -1,12 +1,12 @@
 {
   "schema_version": 2,
-  "cargo_lock_sha256": "86677ed112230e0eeee515223c0d16a5fb7d7ad1b62b41d2ea743a3280ebf5d0",
+  "cargo_lock_sha256": "009dc07587f1613bef30155414a7593284c311f8dd612211e56d952fa164d8af",
   "manifest_sha256": {
-    "Cargo.toml": "dc6271e987afe09d038602abfcdc235dd3b4b593285d90be00a0000e403d0231"
+    "Cargo.toml": "b9f9db3a13edf2c7db27bae68f7042575cde0daffd3d9430a8df5249cbd5ea4d"
   },
   "target_resolves": {
     "base": {
-      "ansible-forge-0.1.5": {
+      "ansible-forge-0.1.6": {
         "runtime_dependencies": [
           {
             "name": "iac_forge",
@@ -2279,7 +2279,7 @@
     }
   },
   "per_crate": {
-    "ansible-forge-0.1.5": {
+    "ansible-forge-0.1.6": {
       "edition": "2024",
       "lib_target": {
         "name": "ansible_forge",
