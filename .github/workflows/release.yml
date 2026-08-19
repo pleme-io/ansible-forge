@@ -62,21 +62,20 @@ jobs:
         # IMPORTANT: this step is intentionally inert until iac-forge ships
         # on crates.io. When it does, drop the `false &&` guard, bump the
         # Cargo.toml `iac-forge` dep to `version = "X"`, and re-tag.
+        # Both guards this step hand-rolled now live in the action, and it knows
+        # more than they did: cargo-publish-crate detects a manifest that cannot
+        # publish (the iac-forge git dep — see the BLOCKER note in the header),
+        # skips a (name, version) already on crates.io, and retries on a 429.
+        # It reports the skip through `skipped-no-publish` rather than an
+        # `exit 0` that reads identically to success.
+        #
+        # The token guard becomes a step `if:` — a condition the engine
+        # evaluates and the run graph shows, instead of a shell branch that
+        # exited 0 whichever way it went.
+        if: env.CARGO_REGISTRY_TOKEN != ''
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
-            echo "[release] CARGO_REGISTRY_TOKEN not set -- skipping crates.io publish."
-            exit 0
-          fi
-          if grep -qE '^\s*iac-forge\s*=\s*\{\s*git' Cargo.toml; then
-            echo "[release] BLOCKER: Cargo.toml still depends on iac-forge via git."
-            echo "[release] crates.io rejects git deps; the iac-forge crate must ship first,"
-            echo "[release] then this manifest must be updated to a version-based dep."
-            echo "[release] Skipping publish until that lands."
-            exit 0
-          fi
-          cargo publish --token "${CARGO_REGISTRY_TOKEN}"
+        uses: pleme-io/actions/cargo-publish-crate@main
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
