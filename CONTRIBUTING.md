@@ -56,9 +56,7 @@ don't).
 - **No new deps without a reason.** This crate is intentionally small —
   three runtime deps (`iac-forge`, `serde`, `serde_json`). Adding more
   needs a sentence in the PR.
-- **CSE alignment.** See the
-  [Constructive Substrate Engineering canonical spec](https://github.com/pleme-io/theory/blob/main/CONSTRUCTIVE-SUBSTRATE-ENGINEERING.md).
-  TL;DR: each change should leave the codebase a little easier to extend,
+- **CSE alignment.** Each change should leave the codebase a little easier to extend,
   not a little more clever.
 
 ## Filing issues

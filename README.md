@@ -151,10 +151,9 @@ Drop the patch before opening a PR.
 
 ## Doctrine
 
-This crate operates under
-[**Constructive Substrate Engineering**](https://github.com/pleme-io/theory/blob/main/CONSTRUCTIVE-SUBSTRATE-ENGINEERING.md).
+This crate operates under **Constructive Substrate Engineering**.
 The Compounding Directive (solve-once, load-bearing fixes, idiom-first,
-direction beats velocity) is in the org `CLAUDE.md`. Read both before
+direction beats velocity) is in the org `CLAUDE.md`. Read it before
 non-trivial changes.
 
 ---
